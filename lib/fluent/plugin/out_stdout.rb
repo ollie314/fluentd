@@ -14,38 +14,26 @@
 #    limitations under the License.
 #
 
-module Fluent
+require 'fluent/plugin/output'
+
+module Fluent::Plugin
   class StdoutOutput < Output
-    Plugin.register_output('stdout', self)
+    Fluent::Plugin.register_output('stdout', self)
 
-    OUTPUT_PROCS = {
-      :json => Proc.new {|record| Yajl.dump(record) },
-      :hash => Proc.new {|record| record.to_s },
-    }
-
-    config_param :output_type, :default => :json do |val|
-      case val.downcase
-      when 'json'
-        :json
-      when 'hash'
-        :hash
-      else
-        raise ConfigError, "stdout output output_type should be 'json' or 'hash'"
-      end
-    end
+    desc 'Output format.(json,hash)'
+    config_param :output_type, default: 'json'
 
     def configure(conf)
       super
-      @output_proc = OUTPUT_PROCS[@output_type]
+      @formatter = Fluent::Plugin.new_formatter(@output_type, parent: self)
+      @formatter.configure(conf)
     end
 
-    def emit(tag, es, chain)
+    def process(tag, es)
       es.each {|time,record|
-        $log.write "#{Time.at(time).localtime} #{tag}: #{@output_proc.call(record)}\n"
+        $log.write "#{Time.at(time).localtime} #{tag}: #{@formatter.format(tag, time, record).chomp}\n"
       }
       $log.flush
-
-      chain.next
     end
   end
 end

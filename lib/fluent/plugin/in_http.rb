@@ -14,6 +14,16 @@
 #    limitations under the License.
 #
 
+require 'uri'
+require 'socket'
+require 'json'
+
+require 'cool.io'
+
+require 'fluent/input'
+require 'fluent/event'
+require 'fluent/process'
+
 module Fluent
   class HttpInput < Input
     Plugin.register_input('http', self)
@@ -24,23 +34,31 @@ module Fluent
 
     def initialize
       require 'webrick/httputils'
-      require 'uri'
       super
     end
 
     EMPTY_GIF_IMAGE = "GIF89a\u0001\u0000\u0001\u0000\x80\xFF\u0000\xFF\xFF\xFF\u0000\u0000\u0000,\u0000\u0000\u0000\u0000\u0001\u0000\u0001\u0000\u0000\u0002\u0002D\u0001\u0000;".force_encoding("UTF-8")
 
-    config_param :port, :integer, :default => 9880
-    config_param :bind, :string, :default => '0.0.0.0'
-    config_param :body_size_limit, :size, :default => 32*1024*1024  # TODO default
-    config_param :keepalive_timeout, :time, :default => 10   # TODO default
-    config_param :backlog, :integer, :default => nil
-    config_param :add_http_headers, :bool, :default => false
-    config_param :add_remote_addr, :bool, :default => false
-    config_param :format, :string, :default => 'default'
-    config_param :blocking_timeout, :time, :default => 0.5
-    config_param :cors_allow_origins, :array, :default => nil
-    config_param :respond_with_empty_img, :bool, :default => false
+    desc 'The port to listen to.'
+    config_param :port, :integer, default: 9880
+    desc 'The bind address to listen to.'
+    config_param :bind, :string, default: '0.0.0.0'
+    desc 'The size limit of the POSTed element. Default is 32MB.'
+    config_param :body_size_limit, :size, default: 32*1024*1024  # TODO default
+    desc 'The timeout limit for keeping the connection alive.'
+    config_param :keepalive_timeout, :time, default: 10   # TODO default
+    config_param :backlog, :integer, default: nil
+    desc 'Add HTTP_ prefix headers to the record.'
+    config_param :add_http_headers, :bool, default: false
+    desc 'Add REMOTE_ADDR header to the record.'
+    config_param :add_remote_addr, :bool, default: false
+    desc 'The format of the HTTP body.'
+    config_param :format, :string, default: 'default'
+    config_param :blocking_timeout, :time, default: 0.5
+    desc 'Set a white list of domains that can do CORS (Cross-Origin Resource Sharing)'
+    config_param :cors_allow_origins, :array, default: nil
+    desc 'Respond with empty gif image of 1x1 pixel.'
+    config_param :respond_with_empty_img, :bool, default: false
 
     def configure(conf)
       super
@@ -83,12 +101,17 @@ module Fluent
 
     def start
       log.debug "listening http on #{@bind}:#{@port}"
-      lsock = TCPServer.new(@bind, @port)
+
+      socket_manager_path = ENV['SERVERENGINE_SOCKETMANAGER_PATH']
+      if Fluent.windows?
+        socket_manager_path = socket_manager_path.to_i
+      end
+      client = ServerEngine::SocketManager::Client.new(socket_manager_path)
+      lsock = client.listen_tcp(@bind, @port)
 
       detach_multi_process do
         super
         @km = KeepaliveManager.new(@keepalive_timeout)
-        #@lsock = Coolio::TCPServer.new(@bind, @port, Handler, @km, method(:on_request), @body_size_limit)
         @lsock = Coolio::TCPServer.new(lsock, nil, Handler, @km, method(:on_request),
                                        @body_size_limit, @format, log,
                                        @cors_allow_origins)
@@ -107,12 +130,14 @@ module Fluent
       @loop.stop
       @lsock.close
       @thread.join
+
+      super
     end
 
     def run
       @loop.run(@blocking_timeout)
     rescue
-      log.error "unexpected error", :error=>$!.to_s
+      log.error "unexpected error", error: $!.to_s
       log.error_backtrace
     end
 
@@ -125,32 +150,32 @@ module Fluent
         # Skip nil record
         if record.nil?
           if @respond_with_empty_img
-            return ["200 OK", {'Content-type'=>'image/gif; charset=utf-8'}, EMPTY_GIF_IMAGE]
+            return ["200 OK", {'Content-Type'=>'image/gif; charset=utf-8'}, EMPTY_GIF_IMAGE]
           else
-            return ["200 OK", {'Content-type'=>'text/plain'}, ""]
+            return ["200 OK", {'Content-Type'=>'text/plain'}, ""]
           end
         end
 
-        if @add_http_headers
-          params.each_pair { |k,v|
-            if k.start_with?("HTTP_")
-              record[k] = v
-            end
-          }
+        unless record.is_a?(Array)
+          if @add_http_headers
+            params.each_pair { |k,v|
+              if k.start_with?("HTTP_")
+                record[k] = v
+              end
+            }
+          end
+          if @add_remote_addr
+            record['REMOTE_ADDR'] = params['REMOTE_ADDR']
+          end
         end
-
-        if @add_remote_addr
-          record['REMOTE_ADDR'] = params['REMOTE_ADDR']
-        end
-
         time = if param_time = params['time']
-                 param_time = param_time.to_i
-                 param_time.zero? ? Engine.now : param_time
+                 param_time = param_time.to_f
+                 param_time.zero? ? Engine.now : Fluent::EventTime.from_time(Time.at(param_time))
                else
                  record_time.nil? ? Engine.now : record_time
                end
       rescue
-        return ["400 Bad Request", {'Content-type'=>'text/plain'}, "400 Bad Request\n#{$!}\n"]
+        return ["400 Bad Request", {'Content-Type'=>'text/plain'}, "400 Bad Request\n#{$!}\n"]
       end
 
       # TODO server error
@@ -159,21 +184,31 @@ module Fluent
         if record.is_a?(Array)
           mes = MultiEventStream.new
           record.each do |single_record|
+            if @add_http_headers
+              params.each_pair { |k,v|
+                if k.start_with?("HTTP_")
+                  single_record[k] = v
+                end
+              }
+            end
+            if @add_remote_addr
+              single_record['REMOTE_ADDR'] = params['REMOTE_ADDR']
+            end
             single_time = single_record.delete("time") || time
             mes.add(single_time, single_record)
           end
           router.emit_stream(tag, mes)
-	else
+        else
           router.emit(tag, time, record)
         end
       rescue
-        return ["500 Internal Server Error", {'Content-type'=>'text/plain'}, "500 Internal Server Error\n#{$!}\n"]
+        return ["500 Internal Server Error", {'Content-Type'=>'text/plain'}, "500 Internal Server Error\n#{$!}\n"]
       end
 
       if @respond_with_empty_img
-        return ["200 OK", {'Content-type'=>'image/gif; charset=utf-8'}, EMPTY_GIF_IMAGE]
+        return ["200 OK", {'Content-Type'=>'image/gif; charset=utf-8'}, EMPTY_GIF_IMAGE]
       else
-        return ["200 OK", {'Content-type'=>'text/plain'}, ""]
+        return ["200 OK", {'Content-Type'=>'text/plain'}, ""]
       end
     end
 
@@ -181,7 +216,7 @@ module Fluent
 
     def parse_params_default(params)
       record = if msgpack = params['msgpack']
-                 MessagePack.unpack(msgpack)
+                 Engine.msgpack_factory.unpacker.feed(msgpack).read
                elsif js = params['json']
                  JSON.parse(js)
                else
@@ -204,6 +239,8 @@ module Fluent
     end
 
     class Handler < Coolio::Socket
+      attr_reader :content_type
+
       def initialize(io, km, callback, body_size_limit, format, log, cors_allow_origins)
         super(io)
         @km = km
@@ -235,7 +272,7 @@ module Fluent
         @idle = 0
         @parser << data
       rescue
-        @log.warn "unexpected error", :error=>$!.to_s
+        @log.warn "unexpected error", error: $!.to_s
         @log.warn_backtrace
         close
       end
@@ -334,6 +371,7 @@ module Fluent
         code, header, body = *@callback.call(path_info, params)
         body = body.to_s
 
+        header['Access-Control-Allow-Origin'] = @origin if !@cors_allow_origins.nil? && @cors_allow_origins.include?(@origin)
         if @keep_alive
           header['Connection'] = 'Keep-Alive'
           send_response(code, header, body)
@@ -356,8 +394,8 @@ module Fluent
       end
 
       def send_response(code, header, body)
-        header['Content-length'] ||= body.bytesize
-        header['Content-type'] ||= 'text/plain'
+        header['Content-Length'] ||= body.bytesize
+        header['Content-Type'] ||= 'text/plain'
 
         data = %[HTTP/1.1 #{code}\r\n]
         header.each_pair {|k,v|

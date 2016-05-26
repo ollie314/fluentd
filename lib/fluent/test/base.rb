@@ -14,17 +14,22 @@
 #    limitations under the License.
 #
 
+require 'fluent/engine'
+require 'fluent/system_config'
+require 'fluent/config'
+require 'serverengine'
+
 module Fluent
   module Test
     def self.setup
       Fluent.__send__(:remove_const, :Engine)
-      engine = Fluent.const_set(:Engine, EngineClass.new).init
+      engine = Fluent.const_set(:Engine, EngineClass.new).init(SystemConfig.new)
 
       engine.define_singleton_method(:now=) {|n|
-        @now = n.to_i
+        @now = n
       }
       engine.define_singleton_method(:now) {
-        @now || super()
+        @now ||= super()
       }
 
       nil
@@ -47,6 +52,7 @@ module Fluent
         end
         @instance.router = Engine.root_agent.event_router
         @instance.log = TestLogger.new
+        Engine.root_agent.instance_variable_set(:@log, @instance.log)
 
         @config = Config.new
       end
@@ -86,6 +92,10 @@ module Fluent
         @logs = []
       end
 
+      def reset
+        @logs = []
+      end
+
       def tty?
         false
       end
@@ -110,12 +120,27 @@ module Fluent
     class TestLogger < Fluent::PluginLogger
       def initialize
         @logdev = DummyLogDevice.new
-        super(Fluent::Log.new(@logdev))
+        dl_opts = {}
+        dl_opts[:log_level] = ServerEngine::DaemonLogger::INFO
+        logger = ServerEngine::DaemonLogger.new(@logdev, dl_opts)
+        log = Fluent::Log.new(logger)
+        super(log)
+      end
+
+      def reset
+        @logdev.reset
       end
 
       def logs
         @logdev.logs
       end
     end
+  end
+end
+
+Test::Unit::Assertions.module_eval do
+  def assert_equal_event_time(a, b)
+    assert_equal(a.sec, b.sec)
+    assert_equal(a.nsec, b.nsec)
   end
 end

@@ -14,6 +14,9 @@
 #    limitations under the License.
 #
 
+require 'fluent/output'
+require 'fluent/config/error'
+
 module Fluent
   class RoundRobinOutput < MultiOutput
     Plugin.register_output('roundrobin', self)
@@ -34,7 +37,7 @@ module Fluent
       conf.elements.select {|e|
         e.name == 'store'
       }.each {|e|
-        type = e['@type'] || e['type']
+        type = e['@type']
         unless type
           raise ConfigError, "Missing 'type' parameter on <store> directive"
         end
@@ -54,17 +57,21 @@ module Fluent
     end
 
     def start
+      super
+
       rebuild_weight_array
 
-      @outputs.each {|o|
-        o.start
-      }
+      @outputs.each do |o|
+        o.start unless o.started?
+      end
     end
 
     def shutdown
-      @outputs.each {|o|
-        o.shutdown
-      }
+      @outputs.each do |o|
+        o.shutdown unless o.shutdown?
+      end
+
+      super
     end
 
     def emit(tag, es, chain)

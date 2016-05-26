@@ -14,11 +14,16 @@
 #    limitations under the License.
 #
 
+require 'fluent/output'
+require 'fluent/config/error'
+require 'fluent/event'
+
 module Fluent
   class CopyOutput < MultiOutput
     Plugin.register_output('copy', self)
 
-    config_param :deep_copy, :bool, :default => false
+    desc 'If true, pass different record to each `store` plugin.'
+    config_param :deep_copy, :bool, default: false
 
     def initialize
       super
@@ -32,7 +37,7 @@ module Fluent
       conf.elements.select {|e|
         e.name == 'store'
       }.each {|e|
-        type = e['@type'] || e['type']
+        type = e['@type']
         unless type
           raise ConfigError, "Missing 'type' parameter on <store> directive"
         end
@@ -46,15 +51,19 @@ module Fluent
     end
 
     def start
-      @outputs.each {|o|
-        o.start
-      }
+      super
+
+      @outputs.each do |o|
+        o.start unless o.started?
+      end
     end
 
     def shutdown
-      @outputs.each {|o|
-        o.shutdown
-      }
+      @outputs.each do |o|
+        o.shutdown unless o.shutdown?
+      end
+
+      super
     end
 
     def emit(tag, es, chain)

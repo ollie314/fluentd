@@ -1,5 +1,6 @@
 require_relative '../helper'
 require 'fluent/test'
+require 'fluent/plugin/out_exec_filter'
 require 'fileutils'
 
 class ExecFilterOutputTest < Test::Unit::TestCase
@@ -20,12 +21,12 @@ class ExecFilterOutputTest < Test::Unit::TestCase
   ]
 
   def create_driver(conf = CONFIG, tag = 'test')
-    Fluent::Test::OutputTestDriver.new(Fluent::ExecFilterOutput, tag).configure(conf)
+    Fluent::Test::BufferedOutputTestDriver.new(Fluent::ExecFilterOutput, tag).configure(conf)
   end
 
   def sed_unbuffered_support?
     @sed_unbuffered_support ||= lambda {
-      system("echo xxx | sed --unbuffered -l -e 's/x/y/g' >/dev/null 2>&1")
+      system("echo xxx | sed --unbuffered -l -e 's/x/y/g' >#{IO::NULL} 2>&1")
       $?.success?
     }.call
   end
@@ -36,6 +37,8 @@ class ExecFilterOutputTest < Test::Unit::TestCase
 
   def test_configure
     d = create_driver
+
+    assert d.instance.instance_eval{ @overrides_format_stream }
 
     assert_equal ["time_in","tag","k1"], d.instance.in_keys
     assert_equal ["time_out","tag","k2"], d.instance.out_keys
@@ -69,8 +72,9 @@ class ExecFilterOutputTest < Test::Unit::TestCase
   def test_emit_1
     d = create_driver
 
-    time = Time.parse("2011-01-02 13:14:15").to_i
+    time = Fluent::EventTime.parse("2011-01-02 13:14:15")
 
+    d.expected_emits_length = 2
     d.run do
       d.emit({"k1"=>1}, time)
       d.emit({"k1"=>2}, time)
@@ -79,7 +83,9 @@ class ExecFilterOutputTest < Test::Unit::TestCase
     emits = d.emits
     assert_equal 2, emits.length
     assert_equal ["test", time, {"k2"=>"1"}], emits[0]
+    assert_equal_event_time time, emits[0][1]
     assert_equal ["test", time, {"k2"=>"2"}], emits[1]
+    assert_equal_event_time time, emits[1][1]
   end
 
   def test_emit_2
@@ -92,8 +98,9 @@ class ExecFilterOutputTest < Test::Unit::TestCase
       num_children 3
     ]
 
-    time = Time.parse("2011-01-02 13:14:15").to_i
+    time = Fluent::EventTime.parse("2011-01-02 13:14:15")
 
+    d.expected_emits_length = 2
     d.run do
       d.emit({"k1"=>1}, time)
       d.emit({"k1"=>2}, time)
@@ -102,7 +109,9 @@ class ExecFilterOutputTest < Test::Unit::TestCase
     emits = d.emits
     assert_equal 2, emits.length
     assert_equal ["xxx", time, {"k2"=>"1"}], emits[0]
+    assert_equal_event_time time, emits[0][1]
     assert_equal ["xxx", time, {"k2"=>"2"}], emits[1]
+    assert_equal_event_time time, emits[1][1]
   end
 
   def test_emit_3
@@ -115,8 +124,9 @@ class ExecFilterOutputTest < Test::Unit::TestCase
       num_children 3
     ]
 
-    time = Time.parse("2011-01-02 13:14:15").to_i
+    time = Fluent::EventTime.parse("2011-01-02 13:14:15")
 
+    d.expected_emits_length = 2
     d.run do
       d.emit({"val1"=>"sed-ed value foo"}, time)
       d.emit({"val1"=>"sed-ed value poo"}, time)
@@ -125,6 +135,7 @@ class ExecFilterOutputTest < Test::Unit::TestCase
     emits = d.emits
     assert_equal 1, emits.length
     assert_equal ["xxx", time, {"val2"=>"sed-ed value foo"}], emits[0]
+    assert_equal_event_time time, emits[0][1]
 
     d = create_driver %[
       command sed #{sed_unbuffered_option} -l -e s/foo/bar/
@@ -135,8 +146,9 @@ class ExecFilterOutputTest < Test::Unit::TestCase
       num_children 3
     ]
 
-    time = Time.parse("2011-01-02 13:14:15").to_i
+    time = Fluent::EventTime.parse("2011-01-02 13:14:15")
 
+    d.expected_emits_length = 2
     d.run do
       d.emit({"val1"=>"sed-ed value foo"}, time)
       d.emit({"val1"=>"sed-ed value poo"}, time)
@@ -145,7 +157,9 @@ class ExecFilterOutputTest < Test::Unit::TestCase
     emits = d.emits
     assert_equal 2, emits.length
     assert_equal ["xxx", time, {"val2"=>"sed-ed value bar"}], emits[0]
+    assert_equal_event_time time, emits[0][1]
     assert_equal ["xxx", time, {"val2"=>"sed-ed value poo"}], emits[1]
+    assert_equal_event_time time, emits[1][1]
   end
 
   def test_emit_4
@@ -160,8 +174,9 @@ class ExecFilterOutputTest < Test::Unit::TestCase
       num_children 3
     ], 'input.test')
 
-    time = Time.parse("2011-01-02 13:14:15").to_i
+    time = Fluent::EventTime.parse("2011-01-02 13:14:15")
 
+    d.expected_emits_length = 2
     d.run do
       d.emit({"val1"=>"sed-ed value foo"}, time)
       d.emit({"val1"=>"sed-ed value poo"}, time)
@@ -170,7 +185,9 @@ class ExecFilterOutputTest < Test::Unit::TestCase
     emits = d.emits
     assert_equal 2, emits.length
     assert_equal ["output.test", time, {"val2"=>"sed-ed value bar"}], emits[0]
+    assert_equal_event_time time, emits[0][1]
     assert_equal ["output.test", time, {"val2"=>"sed-ed value poo"}], emits[1]
+    assert_equal_event_time time, emits[1][1]
   end
 
   def test_json_1
@@ -182,8 +199,9 @@ class ExecFilterOutputTest < Test::Unit::TestCase
       tag_key tag
     ], 'input.test')
 
-    time = Time.parse("2011-01-02 13:14:15").to_i
+    time = Fluent::EventTime.parse("2011-01-02 13:14:15")
 
+    d.expected_emits_length = 1
     d.run do
       d.emit({"message"=>%[{"time":#{time},"tag":"t1","k1":"v1"}]}, time+10)
     end
@@ -191,6 +209,54 @@ class ExecFilterOutputTest < Test::Unit::TestCase
     emits = d.emits
     assert_equal 1, emits.length
     assert_equal ["t1", time, {"k1"=>"v1"}], emits[0]
+    assert_equal_event_time time, emits[0][1]
+  end
+
+  def test_json_with_float_time
+    d = create_driver(%[
+      command cat
+      in_keys message
+      out_format json
+      time_key time
+      tag_key tag
+    ], 'input.test')
+
+    float_time = Time.parse("2011-01-02 13:14:15").to_f
+    time = Fluent::EventTime.from_time(Time.at(float_time))
+
+    d.expected_emits_length = 1
+    d.run do
+      d.emit({"message"=>%[{"time":#{float_time},"tag":"t1","k1":"v1"}]}, time+10)
+    end
+
+    emits = d.emits
+    assert_equal 1, emits.length
+    assert_equal ["t1", time, {"k1"=>"v1"}], emits[0]
+    assert_equal_event_time time, emits[0][1]
+  end
+
+  def test_json_with_time_format
+    d = create_driver(%[
+      command cat
+      in_keys message
+      out_format json
+      time_key time
+      time_format %d/%b/%Y %H:%M:%S.%N %z
+      tag_key tag
+    ], 'input.test')
+
+    time_str = "28/Feb/2013 12:00:00.123456789 +0900"
+    time = Fluent::EventTime.from_time(Time.strptime(time_str, "%d/%b/%Y %H:%M:%S.%N %z"))
+
+    d.expected_emits_length = 1
+    d.run do
+      d.emit({"message"=>%[{"time":"#{time_str}","tag":"t1","k1":"v1"}]}, time+10)
+    end
+
+    emits = d.emits
+    assert_equal 1, emits.length
+    assert_equal ["t1", time, {"k1"=>"v1"}], emits[0]
+    assert_equal_event_time time, emits[0][1]
   end
 end
 

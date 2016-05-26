@@ -7,14 +7,14 @@ module ConfigurableSpec
   class Base1
     include Fluent::Configurable
 
-    config_param :node, :string, :default => "node"
-    config_param :flag1, :bool, :default => false
-    config_param :flag2, :bool, :default => true
+    config_param :node, :string, default: "node"
+    config_param :flag1, :bool, default: false
+    config_param :flag2, :bool, default: true
 
     config_param :name1, :string
     config_param :name2, :string
-    config_param :name3, :string, :default => "base1"
-    config_param :name4, :string, :default => "base1"
+    config_param :name3, :string, default: "base1"
+    config_param :name4, :string, default: "base1"
 
     config_param :opt1, :enum, list: [:foo, :bar, :baz]
     config_param :opt2, :enum, list: [:foo, :bar, :baz], default: :foo
@@ -29,7 +29,7 @@ module ConfigurableSpec
     config_set_default :name4, "base2"
     config_set_default :opt1, :bar
     config_param :name5, :string
-    config_param :name6, :string, :default => "base2"
+    config_param :name6, :string, default: "base2"
     config_param :opt3, :enum, list: [:a, :b]
 
     def get_all
@@ -41,7 +41,7 @@ module ConfigurableSpec
   class Base3 < Base2
     config_set_default :opt3, :a
     config_section :node do
-      config_param :name, :string, :default => "node"
+      config_param :name, :string, default: "node"
       config_param :type, :string
     end
     config_section :branch, required: true, multi: true do
@@ -65,8 +65,8 @@ module ConfigurableSpec
     config_set_default :opt3, :a
     config_section :node, param_name: :nodes do
       config_argument :num, :integer
-      config_param :name, :string, :default => "node"
-      config_param :type, :string, :default => "b4"
+      config_param :name, :string, default: "node"
+      config_param :type, :string, default: "b4"
     end
     config_section :description1, required: false, multi: false do
       config_argument :note, :string, default: "desc1"
@@ -86,6 +86,16 @@ module ConfigurableSpec
     def get_all
       ary = super
       ary + [@nodes, @description1, @description2, @description3]
+    end
+  end
+
+  class Init0
+    include Fluent::Configurable
+    config_section :sec1, init: true, multi: false do
+      config_param :name, :string, default: 'sec1'
+    end
+    config_section :sec2, init: true, multi: true do
+      config_param :name, :string, default: 'sec1'
     end
   end
 
@@ -116,13 +126,6 @@ module ConfigurableSpec
     end
   end
 
-  class Example2 < Example1
-    config_section :detail, required: true, multi: false, alias: "information2" do
-      config_param :address, :string, default: "y"
-      config_param :phone_no, :string
-    end
-  end
-
   class Example3
     include Fluent::Configurable
 
@@ -138,12 +141,199 @@ module ConfigurableSpec
     end
   end
 
-  class Example4 < Example3
-    config_param :age, :integer, default: 20
+  class Example5
+    include Fluent::Configurable
 
-    config_section :appendix, required: false, multi: false, final: false do
-      config_param :name, :string, default: "y"
-      config_param :age, :integer, default: 10
+    config_param :normal_param, :string
+    config_param :secret_param, :string, secret: true
+
+    config_section :section  do
+      config_param :normal_param2, :string
+      config_param :secret_param2, :string, secret: true
+    end
+  end
+
+  class Example6
+    include Fluent::Configurable
+    config_param :obj1, :hash, default: {}
+    config_param :obj2, :array, default: []
+  end
+
+  module Overwrite
+    class Base
+      include Fluent::Configurable
+
+      config_param :name, :string, alias: :fullname
+      config_param :bool, :bool, alias: :flag
+      config_section :detail, required: false, multi: false, alias: "information" do
+        config_param :address, :string, default: "x"
+      end
+    end
+
+    class Required < Base
+      config_section :detail, required: true do
+        config_param :address, :string, default: "x"
+      end
+    end
+
+    class Multi < Base
+      config_section :detail, multi: true do
+        config_param :address, :string, default: "x"
+      end
+    end
+
+    class Alias < Base
+      config_section :detail, alias: "information2" do
+        config_param :address, :string, default: "x"
+      end
+    end
+
+    class DefaultOptions < Base
+      config_section :detail do
+        config_param :address, :string, default: "x"
+      end
+    end
+
+    class DetailAddressDefault < Base
+      config_section :detail do
+        config_param :address, :string, default: "y"
+      end
+    end
+
+    class AddParam < Base
+      config_section :detail do
+        config_param :phone_no, :string
+      end
+    end
+
+    class AddParamOverwriteAddress < Base
+      config_section :detail do
+        config_param :address, :string, default: "y"
+        config_param :phone_no, :string
+      end
+    end
+  end
+
+  module Final
+    # Show what is allowed in finalized sections
+    # InheritsFinalized < Finalized < Base
+    class Base
+      include Fluent::Configurable
+      config_section :appendix, multi: false, final: false do
+        config_param :code, :string
+        config_param :name, :string
+        config_param :address, :string, default: ""
+      end
+    end
+
+    class Finalized < Base
+      # to non-finalized section
+      # subclass can change type (code)
+      #          add default value (name)
+      #          change default value (address)
+      #          add field (age)
+      config_section :appendix, final: true do
+        config_param :code, :integer
+        config_set_default :name, "y"
+        config_set_default :address, "-"
+        config_param :age, :integer, default: 10
+      end
+    end
+
+    class InheritsFinalized < Finalized
+      # to finalized section
+      # subclass can add default value (code)
+      #              change default value (age)
+      #              add field (phone_no)
+      config_section :appendix do
+        config_set_default :code, 2
+        config_set_default :age, 0
+        config_param :phone_no, :string
+      end
+    end
+
+    # Show what is allowed/prohibited for finalized sections
+    class FinalizedBase
+      include Fluent::Configurable
+      config_section :appendix, param_name: :apd, init: false, required: true, multi: false, alias: "options", final: true do
+        config_param :name, :string
+      end
+    end
+
+    class FinalizedBase2
+      include Fluent::Configurable
+      config_section :appendix, param_name: :apd, init: false, required: false, multi: false, alias: "options", final: true do
+        config_param :name, :string
+      end
+    end
+
+    # subclass can change init with adding default values
+    class OverwriteInit < FinalizedBase2
+      config_section :appendix, init: true do
+        config_set_default :name, "moris"
+        config_param :code, :integer, default: 0
+      end
+    end
+
+    # subclass cannot change type (name)
+    class Subclass < FinalizedBase
+      config_section :appendix do
+        config_param :name, :integer
+      end
+    end
+
+    # subclass cannot change param_name
+    class OverwriteParamName < FinalizedBase
+      config_section :appendix, param_name: :adx do
+      end
+    end
+
+    # subclass cannot change final (section)
+    class OverwriteFinal < FinalizedBase
+      config_section :appendix, final: false do
+        config_param :name, :integer
+      end
+    end
+
+    # subclass cannot change required
+    class OverwriteRequired < FinalizedBase
+      config_section :appendix, required: false do
+      end
+    end
+
+    # subclass cannot change multi
+    class OverwriteMulti < FinalizedBase
+      config_section :appendix, multi: true do
+      end
+    end
+
+    # subclass cannot change alias
+    class OverwriteAlias < FinalizedBase
+      config_section :appendix, alias: "options2" do
+      end
+    end
+  end
+
+  module OverwriteDefaults
+    class Owner
+      include Fluent::Configurable
+      config_set_default :key1, "V1"
+      config_section :buffer do
+        config_set_default :size_of_something, 1024
+      end
+    end
+
+    class FlatChild
+      include Fluent::Configurable
+      attr_accessor :owner
+      config_param :key1, :string, default: "v1"
+    end
+
+    class BufferChild
+      include Fluent::Configurable
+      attr_accessor :owner
+      configured_in :buffer
+      config_param :size_of_something, :size, default: 128
     end
   end
 end
@@ -184,16 +374,16 @@ module Fluent::Config
       sub_test_case '#configure' do
         test 'returns configurable object itself' do
           b2 = ConfigurableSpec::Base2.new
-          assert_instance_of(ConfigurableSpec::Base2, b2.configure({"name1" => "t1", "name5" => "t5", "opt3" => "a"}))
+          assert_instance_of(ConfigurableSpec::Base2, b2.configure(config_element("", "", {"name1" => "t1", "name5" => "t5", "opt3" => "a"})))
         end
 
         test 'raise errors without any specifications for param without defaults' do
           b2 = ConfigurableSpec::Base2.new
-          assert_raise(Fluent::ConfigError) { b2.configure({}) }
-          assert_raise(Fluent::ConfigError) { b2.configure({"name1" => "t1"}) }
-          assert_raise(Fluent::ConfigError) { b2.configure({"name5" => "t5"}) }
-          assert_raise(Fluent::ConfigError) { b2.configure({"name1" => "t1", "name5" => "t5"}) }
-          assert_nothing_raised { b2.configure({"name1" => "t1", "name5" => "t5", "opt3" => "a"}) }
+          assert_raise(Fluent::ConfigError) { b2.configure(config_element("", "", {})) }
+          assert_raise(Fluent::ConfigError) { b2.configure(config_element("", "", {"name1" => "t1"})) }
+          assert_raise(Fluent::ConfigError) { b2.configure(config_element("", "", {"name5" => "t5"})) }
+          assert_raise(Fluent::ConfigError) { b2.configure(config_element("", "", {"name1" => "t1", "name5" => "t5"})) }
+          assert_nothing_raised { b2.configure(config_element("", "", {"name1" => "t1", "name5" => "t5", "opt3" => "a"})) }
 
           assert_equal(["node", false, true, "t1", "base2", "base1", "base2", "t5", "base2"], b2.get_all)
           assert_equal(:a, b2.opt3)
@@ -201,19 +391,19 @@ module Fluent::Config
 
         test 'can configure bool values' do
           b2a = ConfigurableSpec::Base2.new
-          assert_nothing_raised { b2a.configure({"flag1" => "true", "flag2" => "yes", "name1" => "t1", "name5" => "t5", "opt3" => "a"}) }
+          assert_nothing_raised { b2a.configure(config_element("", "", {"flag1" => "true", "flag2" => "yes", "name1" => "t1", "name5" => "t5", "opt3" => "a"})) }
           assert_true(b2a.flag1)
           assert_true(b2a.flag2)
 
           b2b = ConfigurableSpec::Base2.new
-          assert_nothing_raised { b2b.configure({"flag1" => false, "flag2" => "no", "name1" => "t1", "name5" => "t5", "opt3" => "a"}) }
+          assert_nothing_raised { b2b.configure(config_element("", "", {"flag1" => false, "flag2" => "no", "name1" => "t1", "name5" => "t5", "opt3" => "a"})) }
           assert_false(b2b.flag1)
           assert_false(b2b.flag2)
         end
 
         test 'overwrites values of defaults' do
           b2 = ConfigurableSpec::Base2.new
-          b2.configure({"name1" => "t1", "name2" => "t2", "name3" => "t3", "name4" => "t4", "name5" => "t5", "opt1" => "foo", "opt3" => "b"})
+          b2.configure(config_element("", "", {"name1" => "t1", "name2" => "t2", "name3" => "t3", "name4" => "t4", "name5" => "t5", "opt1" => "foo", "opt3" => "b"}))
           assert_equal("t1", b2.name1)
           assert_equal("t2", b2.name2)
           assert_equal("t3", b2.name3)
@@ -227,13 +417,44 @@ module Fluent::Config
         end
 
         test 'enum type rejects values which does not exist in list' do
-          default = {"name1" => "t1", "name2" => "t2", "name3" => "t3", "name4" => "t4", "name5" => "t5", "opt1" => "foo", "opt3" => "b"}
+          default = config_element("", "", {"name1" => "t1", "name2" => "t2", "name3" => "t3", "name4" => "t4", "name5" => "t5", "opt1" => "foo", "opt3" => "b"})
 
           b2 = ConfigurableSpec::Base2.new
           assert_nothing_raised { b2.configure(default) }
           assert_raise(Fluent::ConfigError) { b2.configure(default.merge({"opt1" => "bazz"})) }
           assert_raise(Fluent::ConfigError) { b2.configure(default.merge({"opt2" => "fooooooo"})) }
           assert_raise(Fluent::ConfigError) { b2.configure(default.merge({"opt3" => "c"})) }
+        end
+
+        sub_test_case 'default values should be duplicated before touched in plugin code' do
+          test 'default object should be dupped for cases configured twice' do
+            x6a = ConfigurableSpec::Example6.new
+            assert_nothing_raised { x6a.configure(config_element("")) }
+            assert_equal({}, x6a.obj1)
+            assert_equal([], x6a.obj2)
+
+            x6b = ConfigurableSpec::Example6.new
+            assert_nothing_raised { x6b.configure(config_element("")) }
+            assert_equal({}, x6b.obj1)
+            assert_equal([], x6b.obj2)
+
+            assert { x6a.obj1.object_id != x6b.obj1.object_id }
+            assert { x6a.obj2.object_id != x6b.obj2.object_id }
+
+            x6c = ConfigurableSpec::Example6.new
+            assert_nothing_raised { x6c.configure(config_element("")) }
+            assert_equal({}, x6c.obj1)
+            assert_equal([], x6c.obj2)
+
+            x6c.obj1['k'] = 'v'
+            x6c.obj2 << 'v'
+
+            assert_equal({'k' => 'v'}, x6c.obj1)
+            assert_equal(['v'], x6c.obj2)
+
+            assert_equal({}, x6a.obj1)
+            assert_equal([], x6a.obj2)
+          end
         end
       end
     end
@@ -270,12 +491,6 @@ module Fluent::Config
       end
 
       sub_test_case '#configure' do
-        def e(name, arg = '', attrs = {}, elements = [])
-          attrs_str_keys = {}
-          attrs.each{|key, value| attrs_str_keys[key.to_s] = value }
-          Fluent::Config::Element.new(name, arg, attrs_str_keys, elements)
-        end
-
         BASE_ATTRS = {
           "name1" => "1", "name2" => "2", "name3" => "3",
           "name4" => "4", "name5" => "5", "name6" => "6",
@@ -283,68 +498,68 @@ module Fluent::Config
         test 'checks required subsections' do
           b3 = ConfigurableSpec::Base3.new
           # branch sections required
-          assert_raise(Fluent::ConfigError) { b3.configure(e('ROOT', '', BASE_ATTRS, [])) }
+          assert_raise(Fluent::ConfigError) { b3.configure(config_element('ROOT', '', BASE_ATTRS, [])) }
 
           # branch argument required
           msg = "'<branch ARG>' section requires argument, in section branch"
           #expect{ b3.configure(e('ROOT', '', BASE_ATTRS, [e('branch', '')])) }.to raise_error(Fluent::ConfigError, msg)
-          assert_raise(Fluent::ConfigError.new(msg)) { b3.configure(e('ROOT', '', BASE_ATTRS, [e('branch', '')])) }
+          assert_raise(Fluent::ConfigError.new(msg)) { b3.configure(config_element('ROOT', '', BASE_ATTRS, [config_element('branch', '')])) }
 
           # leaf is not required
-          assert_nothing_raised { b3.configure(e('ROOT', '', BASE_ATTRS, [e('branch', 'branch_name')])) }
+          assert_nothing_raised { b3.configure(config_element('ROOT', '', BASE_ATTRS, [config_element('branch', 'branch_name')])) }
 
           # leaf weight required
           msg = "'weight' parameter is required, in section branch > leaf"
-          branch1 = e('branch', 'branch_name', {size: 1}, [e('leaf', '10', {weight: 1})])
-          assert_nothing_raised { b3.configure(e('ROOT', '', BASE_ATTRS, [branch1])) }
-          branch2 = e('branch', 'branch_name', {size: 1}, [e('leaf', '20')])
-          assert_raise(Fluent::ConfigError.new(msg)) { b3.configure(e('ROOT', '', BASE_ATTRS, [branch1, branch2])) }
-          branch3 = e('branch', 'branch_name', {size: 1}, [e('leaf', '10', {weight: 3}), e('leaf', '20')])
-          assert_raise(Fluent::ConfigError.new(msg)) { b3.configure(e('ROOT', '', BASE_ATTRS, [branch3])) }
+          branch1 = config_element('branch', 'branch_name', {size: 1}, [config_element('leaf', '10', {"weight" => 1})])
+          assert_nothing_raised { b3.configure(config_element('ROOT', '', BASE_ATTRS, [branch1])) }
+          branch2 = config_element('branch', 'branch_name', {size: 1}, [config_element('leaf', '20')])
+          assert_raise(Fluent::ConfigError.new(msg)) { b3.configure(config_element('ROOT', '', BASE_ATTRS, [branch1, branch2])) }
+          branch3 = config_element('branch', 'branch_name', {size: 1}, [config_element('leaf', '10', {"weight" =>  3}), config_element('leaf', '20')])
+          assert_raise(Fluent::ConfigError.new(msg)) { b3.configure(config_element('ROOT', '', BASE_ATTRS, [branch3])) }
 
           ### worm not required
 
           b4 = ConfigurableSpec::Base4.new
 
-          d1 = e('description1', '', {text:"d1"})
-          d2 = e('description2', '', {text:"d2"})
-          d3 = e('description3', '', {text:"d3"})
-          assert_nothing_raised { b4.configure(e('ROOT', '', BASE_ATTRS, [d1.dup, d2.dup, d3.dup])) }
+          d1 = config_element('description1', '', {"text" => "d1"})
+          d2 = config_element('description2', '', {"text" => "d2"})
+          d3 = config_element('description3', '', {"text" => "d3"})
+          assert_nothing_raised { b4.configure(config_element('ROOT', '', BASE_ATTRS, [d1.dup, d2.dup, d3.dup])) }
 
           # description1 cannot be specified 2 or more
           msg = "'<description1>' section cannot be written twice or more"
-          assert_raise(Fluent::ConfigError.new(msg)) { b4.configure(e('ROOT', '', BASE_ATTRS, [d1.dup, d2.dup, d1.dup, d3.dup])) }
+          assert_raise(Fluent::ConfigError.new(msg)) { b4.configure(config_element('ROOT', '', BASE_ATTRS, [d1.dup, d2.dup, d1.dup, d3.dup])) }
 
           # description2 cannot be specified 2 or more
           msg = "'<description2>' section cannot be written twice or more"
-          assert_raise(Fluent::ConfigError.new(msg)) { b4.configure(e('ROOT', '', BASE_ATTRS, [d1.dup, d2.dup, d3.dup, d2.dup])) }
+          assert_raise(Fluent::ConfigError.new(msg)) { b4.configure(config_element('ROOT', '', BASE_ATTRS, [d1.dup, d2.dup, d3.dup, d2.dup])) }
 
           # description3 can be specified 2 or more
-          assert_nothing_raised { b4.configure(e('ROOT', '', BASE_ATTRS, [d1.dup, d2.dup, d3.dup, d3.dup])) }
+          assert_nothing_raised { b4.configure(config_element('ROOT', '', BASE_ATTRS, [d1.dup, d2.dup, d3.dup, d3.dup])) }
         end
 
         test 'constructs confuguration object tree for Base3' do
-          conf = e(
+          conf = config_element(
             'ROOT',
             '',
             BASE_ATTRS,
             [
-              e('node', '', {type:"1"}), e('node', '', {name:"node2",type:"2"}),
-              e('branch', 'b1.*', {}, []),
-              e('branch',
+              config_element('node', '', {"type" => "1"}), config_element('node', '', {"name" => "node2","type" => "2"}),
+              config_element('branch', 'b1.*', {}, []),
+              config_element('branch',
                 'b2.*',
-                {size: 5},
+                {"size" => 5},
                 [
-                  e('leaf', 'THIS IS IGNORED', {weight: 55}, []),
-                  e('leaf', 'THIS IS IGNORED', {weight: 50}, [ e('worm', '', {}) ]),
-                  e('leaf', 'THIS IS IGNORED', {weight: 50}, [ e('worm', '', {type:"w1"}), e('worm', '', {type:"w2"}) ]),
+                  config_element('leaf', 'THIS IS IGNORED', {"weight" =>  55}, []),
+                  config_element('leaf', 'THIS IS IGNORED', {"weight" =>  50}, [ config_element('worm', '', {}) ]),
+                  config_element('leaf', 'THIS IS IGNORED', {"weight" =>  50}, [ config_element('worm', '', {"type" => "w1"}), config_element('worm', '', {"type" => "w2"}) ]),
                 ]
                 ),
-              e('branch',
+              config_element('branch',
                 'b3.*',
-                {size: "503"},
+                {"size" => "503"},
                 [
-                  e('leaf', 'THIS IS IGNORED', {weight: 55}, []),
+                  config_element('leaf', 'THIS IS IGNORED', {"weight" =>  55}, []),
                 ]
                 )
             ],
@@ -401,18 +616,18 @@ module Fluent::Config
         end
 
         test 'constructs confuguration object tree for Base4' do
-          conf = e(
+          conf = config_element(
             'ROOT',
             '',
             BASE_ATTRS,
             [
-              e('node', '1', {type:"1"}), e('node', '2', {name:"node2"}),
-              e('description3', '', {text:"dddd3-1"}),
-              e('description2', 'd-2', {text:"dddd2"}),
-              e('description1', '', {text:"dddd1"}),
-              e('description3', 'd-3', {text:"dddd3-2"}),
-              e('description3', 'd-3a', {text:"dddd3-3"}),
-              e('node', '4', {type:"four"}),
+              config_element('node', '1', {"type" => "1"}), config_element('node', '2', {"name" => "node2"}),
+              config_element('description3', '', {"text" => "dddd3-1"}),
+              config_element('description2', 'd-2', {"text" => "dddd2"}),
+              config_element('description1', '', {"text" => "dddd1"}),
+              config_element('description3', 'd-3', {"text" => "dddd3-2"}),
+              config_element('description3', 'd-3a', {"text" => "dddd3-3"}),
+              config_element('node', '4', {"type" => "four"}),
             ],
             )
           b4 = ConfigurableSpec::Base4.new.configure(conf)
@@ -438,9 +653,9 @@ module Fluent::Config
           assert_equal("node", b4.nodes[2].name)
           assert_equal("four", b4.nodes[2].type)
 
-          # e('description3', '', {text:"dddd3-1"}),
-          # e('description3', 'd-3', {text:"dddd3-2"}),
-          # e('description3', 'd-3a', {text:"dddd3-3"}),
+          # config_element('description3', '', {"text" => "dddd3-1"}),
+          # config_element('description3', 'd-3', {"text" => "dddd3-2"}),
+          # config_element('description3', 'd-3a', {"text" => "dddd3-3"}),
 
           # NoMethodError: undefined method `class' for <Fluent::Config::Section {...}>:Fluent::Config::Section occurred. Should we add class method to Section?
           #assert_equal('Fluent::Config::Section', b4.description1.class.name)
@@ -463,37 +678,46 @@ module Fluent::Config
         end
 
         test 'checks missing of specifications' do
-          conf0 = e('ROOT', '', {}, [])
+          conf0 = config_element('ROOT', '', {}, [])
           ex01 = ConfigurableSpec::Example0.new
           assert_raise(Fluent::ConfigError) { ex01.configure(conf0) }
 
-          complete = {
+          complete = config_element('ROOT', '', {
             "stringvalue" => "s1", "boolvalue" => "yes", "integervalue" => "10",
             "sizevalue" => "10m", "timevalue" => "100s", "floatvalue" => "1.001",
             "hashvalue" => '{"foo":1, "bar":2}',
             "arrayvalue" => '[1,"ichi"]',
-          }
+          })
 
           checker = lambda { |conf| ConfigurableSpec::Example0.new.configure(conf) }
 
           assert_nothing_raised { checker.call(complete) }
-          assert_raise(Fluent::ConfigError) { checker.call(complete.reject{|k,v| k == "stringvalue" }) }
-          assert_raise(Fluent::ConfigError) { checker.call(complete.reject{|k,v| k == "boolvalue"   }) }
-          assert_raise(Fluent::ConfigError) { checker.call(complete.reject{|k,v| k == "integervalue"}) }
-          assert_raise(Fluent::ConfigError) { checker.call(complete.reject{|k,v| k == "sizevalue"   }) }
-          assert_raise(Fluent::ConfigError) { checker.call(complete.reject{|k,v| k == "timevalue"   }) }
-          assert_raise(Fluent::ConfigError) { checker.call(complete.reject{|k,v| k == "floatvalue"  }) }
-          assert_raise(Fluent::ConfigError) { checker.call(complete.reject{|k,v| k == "hashvalue"   }) }
-          assert_raise(Fluent::ConfigError) { checker.call(complete.reject{|k,v| k == "arrayvalue"  }) }
+          assert_raise(Fluent::ConfigError) { c = complete.dup; c.delete("stringvalue"); checker.call(c) }
+          assert_raise(Fluent::ConfigError) { c = complete.dup; c.delete("boolvalue"); checker.call(c) }
+          assert_raise(Fluent::ConfigError) { c = complete.dup; c.delete("integervalue"); checker.call(c) }
+          assert_raise(Fluent::ConfigError) { c = complete.dup; c.delete("sizevalue"); checker.call(c) }
+          assert_raise(Fluent::ConfigError) { c = complete.dup; c.delete("timevalue"); checker.call(c) }
+          assert_raise(Fluent::ConfigError) { c = complete.dup; c.delete("floatvalue"); checker.call(c) }
+          assert_raise(Fluent::ConfigError) { c = complete.dup; c.delete("hashvalue"); checker.call(c) }
+          assert_raise(Fluent::ConfigError) { c = complete.dup; c.delete("arrayvalue"); checker.call(c) }
+        end
+
+        test 'generates section with default values for init:true sections' do
+          conf = config_element('ROOT', '', {}, [])
+          init0 = ConfigurableSpec::Init0.new
+          assert_nothing_raised { init0.configure(conf) }
+          assert init0.sec1
+          assert_equal "sec1", init0.sec1.name
+          assert_equal [], init0.sec2
         end
 
         test 'accepts configuration values as string representation' do
-          conf = {
+          conf = config_element('ROOT', '', {
             "stringvalue" => "s1", "boolvalue" => "yes", "integervalue" => "10",
             "sizevalue" => "10m", "timevalue" => "10m", "floatvalue" => "1.001",
             "hashvalue" => '{"foo":1, "bar":2}',
             "arrayvalue" => '[1,"ichi"]',
-          }
+          })
           ex = ConfigurableSpec::Example0.new.configure(conf)
           assert_equal("s1", ex.stringvalue)
           assert_true(ex.boolvalue)
@@ -506,12 +730,12 @@ module Fluent::Config
         end
 
         test 'accepts configuration values as ruby value representation (especially for DSL)' do
-          conf = {
+          conf = config_element('ROOT', '', {
             "stringvalue" => "s1", "boolvalue" => true, "integervalue" => 10,
             "sizevalue" => 10 * 1024 * 1024, "timevalue" => 10 * 60, "floatvalue" => 1.001,
             "hashvalue" => {"foo" => 1, "bar" => 2},
             "arrayvalue" => [1,"ichi"],
-          }
+          })
           ex = ConfigurableSpec::Example0.new.configure(conf)
           assert_equal("s1", ex.stringvalue)
           assert_true(ex.boolvalue)
@@ -524,12 +748,12 @@ module Fluent::Config
         end
 
         test 'gets both of true(yes) and false(no) for bool value parameter' do
-          conf = {
+          conf = config_element('ROOT', '', {
             "stringvalue" => "s1", "integervalue" => 10,
             "sizevalue" => 10 * 1024 * 1024, "timevalue" => 10 * 60, "floatvalue" => 1.001,
             "hashvalue" => {"foo" => 1, "bar" => 2},
             "arrayvalue" => [1,"ichi"],
-          }
+          })
           ex0 = ConfigurableSpec::Example0.new.configure(conf.merge({"boolvalue" => "true"}))
           assert_true(ex0.boolvalue)
 
@@ -551,93 +775,212 @@ module Fluent::Config
       end
 
       sub_test_case '.config_section' do
-        def e(name, arg = '', attrs = {}, elements = [])
-          attrs_str_keys = {}
-          attrs.each{|key, value| attrs_str_keys[key.to_s] = value }
-          Fluent::Config::Element.new(name, arg, attrs_str_keys, elements)
+        CONF1 = config_element('ROOT', '', {
+                                 'name' => 'tagomoris',
+                                 'bool' => true,
+                               })
+
+        CONF2 = config_element('ROOT', '', {
+                                 'name' => 'tagomoris',
+                                 'bool' => true,
+                               },
+                               [config_element('detail', '', { 'phone_no' => "+81-00-0000-0000" }, [])])
+
+        CONF3 = config_element('ROOT', '', {
+                                 'name' => 'tagomoris',
+                                 'bool' => true,
+                               },
+                               [config_element('detail', '', { 'address' => "Chiyoda Tokyo Japan" }, [])])
+
+        CONF4 = config_element('ROOT', '', {
+                                 'name' => 'tagomoris',
+                                 'bool' => true,
+                               },
+                               [
+                                 config_element('detail', '', {
+                                                  'address' => "Chiyoda Tokyo Japan",
+                                                  'phone_no' => '+81-00-0000-0000'
+                                                },
+                                                [])
+                               ])
+
+        data(conf1: CONF1,
+             conf2: CONF2,
+             conf3: CONF3,
+             conf4: CONF4,)
+        test 'base class' do |data|
+          assert_nothing_raised { ConfigurableSpec::Overwrite::Base.new.configure(data) }
         end
 
-        test 'subclass configuration spec can overwrite superclass specs' do
-          # conf0 = e('ROOT', '', {}, [])
-
-          conf1 = e('ROOT', '', {
-              'name' => 'tagomoris',
-              'bool' => true,
-            },
-          )
-          # <detail> section is required by overwriting of Example2 config_section spec
-          assert_nothing_raised { ConfigurableSpec::Example1.new.configure(conf1) }
-          assert_raise(Fluent::ConfigError.new("'<detail>' sections are required")) { ConfigurableSpec::Example2.new.configure(conf1) }
-
-          conf2 = e('ROOT', '', {
-              'name' => 'tagomoris',
-              'bool' => true,
-            },
-            [e('detail', '', { 'phone_no' => "+81-00-0000-0000" }, [])],
-          )
-          # <detail> address </detail> default is overwritten by Example2
-          assert_nothing_raised { ConfigurableSpec::Example1.new.configure(conf2) }
-          assert_nothing_raised { ConfigurableSpec::Example2.new.configure(conf2) }
-          ex1 = ConfigurableSpec::Example1.new.configure(conf2)
-          assert_equal "x", ex1.detail.address
-          ex2 = ConfigurableSpec::Example2.new.configure(conf2)
-          assert_equal "y", ex2.detail.address
-
-          conf3 = e('ROOT', '', {
-              'name' => 'tagomoris',
-              'bool' => true,
-            },
-            [e('detail', '', { 'address' => "Chiyoda Tokyo Japan" }, [])],
-          )
-          # <detail> phone_no </detail> is required by Example2 config_param spec
-          assert_nothing_raised { ConfigurableSpec::Example1.new.configure(conf3) }
-          assert_raise(Fluent::ConfigError.new("'phone_no' parameter is required, in section detail")) { ConfigurableSpec::Example2.new.configure(conf3) }
-
-          conf4 = e('ROOT', '', {
-              'name' => 'tagomoris',
-              'bool' => true,
-            },
-            [e('detail', '', { 'address' => "Chiyoda Tokyo Japan", 'phone_no' => '+81-00-0000-0000' }, [])],
-          )
-          assert_nothing_raised { ConfigurableSpec::Example1.new.configure(conf4) } # phone_no is not used
-          assert_nothing_raised { ConfigurableSpec::Example2.new.configure(conf4) }
-
-          ex2 = ConfigurableSpec::Example2.new.configure(conf4)
-          assert_equal "Chiyoda Tokyo Japan", ex2.detail.address
-          assert_equal "+81-00-0000-0000", ex2.detail.phone_no
+        test 'subclass cannot overwrite required' do
+          assert_raise(Fluent::ConfigError.new("BUG: subclass cannot overwrite base class's config_section: required")) do
+            ConfigurableSpec::Overwrite::Required.new.configure(CONF1)
+          end
         end
 
-        test 'adds only config_param definitions into configuration without overwriting existing finalized configuration elements' do
+        test 'subclass cannot overwrite multi' do
+          assert_raise(Fluent::ConfigError.new("BUG: subclass cannot overwrite base class's config_section: multi")) do
+            ConfigurableSpec::Overwrite::Multi.new.configure(CONF1)
+          end
+        end
 
-          conf1 = e('ROOT', '', {}, [])
-          # <appendix> is required by Example3 and its not be overwritten by Example4
-          assert_raise(Fluent::ConfigError.new("'<appendix>' sections are required")) { ConfigurableSpec::Example3.new.configure(conf1) }
-          assert_raise(Fluent::ConfigError.new("'<appendix>' sections are required")) { ConfigurableSpec::Example4.new.configure(conf1) }
+        test 'subclass cannot overwrite alias' do
+          assert_raise(Fluent::ConfigError.new("BUG: subclass cannot overwrite base class's config_section: alias")) do
+            ConfigurableSpec::Overwrite::Alias.new.configure(CONF1)
+          end
+        end
 
-          conf2 = e('ROOT', '', {
-            },
-            [e('appendix', '', {'type' => '1'}, [])],
-          )
-          # default value of age is overwritten by Example4, because root proxy is not finalized
-          ex3 = ConfigurableSpec::Example3.new.configure(conf2)
-          assert_equal 10, ex3.age
-          assert_equal '1', ex3.appendix.type
-          ex4 = ConfigurableSpec::Example4.new.configure(conf2)
-          assert_equal 20, ex4.age
-          assert_equal '1', ex4.appendix.type
+        test 'subclass uses superclass default options' do
+          base = ConfigurableSpec::Overwrite::Base.new.configure(CONF2)
+          sub = ConfigurableSpec::Overwrite::DefaultOptions.new.configure(CONF2)
+          detail_base = base.class.merged_configure_proxy.sections[:detail]
+          detail_sub = sub.class.merged_configure_proxy.sections[:detail]
+          detail_base_attributes = {
+            requried: detail_base.required,
+            multi: detail_base.multi,
+            alias: detail_base.alias,
+          }
+          detail_sub_attributes = {
+            requried: detail_sub.required,
+            multi: detail_sub.multi,
+            alias: detail_sub.alias,
+          }
+          assert_equal(detail_base_attributes, detail_sub_attributes)
+        end
 
-          conf3 = e('ROOT', '', {},
-            [e('appendix', '', {'type' => '2'}, [])],
-          )
-          # default value of <appendix> name </appendix> cannot be overwritten because it is finalized
-          ex3 = ConfigurableSpec::Example3.new.configure(conf2)
-          assert_equal 10, ex3.age
-          assert_equal '1', ex3.appendix.type
-          ex4 = ConfigurableSpec::Example4.new.configure(conf2)
-          assert_equal 20, ex4.age
-          assert_equal '1', ex4.appendix.type
-          # <appendix> age </appendix> can be added because it is missing in superclass spec
-          assert_equal 10, ex4.appendix.age
+        test 'subclass can overwrite detail.address' do
+          base = ConfigurableSpec::Overwrite::Base.new.configure(CONF2)
+          target = ConfigurableSpec::Overwrite::DetailAddressDefault.new.configure(CONF2)
+          expected_addresses = ["x", "y"]
+          actual_addresses = [base.detail.address, target.detail.address]
+          assert_equal(expected_addresses, actual_addresses)
+        end
+
+        test 'subclass can add param' do
+          assert_raise(Fluent::ConfigError.new("'phone_no' parameter is required, in section detail")) do
+            ConfigurableSpec::Overwrite::AddParam.new.configure(CONF3)
+          end
+          target = ConfigurableSpec::Overwrite::AddParam.new.configure(CONF4)
+          expected = {
+            address: "Chiyoda Tokyo Japan",
+            phone_no: "+81-00-0000-0000"
+          }
+          actual = {
+            address: target.detail.address,
+            phone_no: target.detail.phone_no
+          }
+          assert_equal(expected, actual)
+        end
+
+        test 'subclass can add param with overwriting address' do
+          assert_raise(Fluent::ConfigError.new("'phone_no' parameter is required, in section detail")) do
+            ConfigurableSpec::Overwrite::AddParamOverwriteAddress.new.configure(CONF3)
+          end
+          target = ConfigurableSpec::Overwrite::AddParamOverwriteAddress.new.configure(CONF4)
+          expected = {
+            address: "Chiyoda Tokyo Japan",
+            phone_no: "+81-00-0000-0000"
+          }
+          actual = {
+            address: target.detail.address,
+            phone_no: target.detail.phone_no
+          }
+          assert_equal(expected, actual)
+        end
+
+        sub_test_case 'final' do
+          test 'base class has designed params and default values' do
+            b = ConfigurableSpec::Final::Base.new
+            appendix_conf = config_element('appendix', '', {"code" => "b", "name" => "base"})
+            b.configure(config_element('ROOT', '', {}, [appendix_conf]))
+
+            assert_equal "b", b.appendix.code
+            assert_equal "base", b.appendix.name
+            assert_equal "", b.appendix.address
+          end
+
+          test 'subclass can change type, add default value, change default value of parameters, and add parameters to non-finalized section' do
+            f = ConfigurableSpec::Final::Finalized.new
+            appendix_conf = config_element('appendix', '', {"code" => 1})
+            f.configure(config_element('ROOT', '', {}, [appendix_conf]))
+
+            assert_equal 1, f.appendix.code
+            assert_equal 'y', f.appendix.name
+            assert_equal "-", f.appendix.address
+            assert_equal 10, f.appendix.age
+          end
+
+          test 'subclass can add default value, change default value of parameters, and add parameters to finalized section' do
+            i = ConfigurableSpec::Final::InheritsFinalized.new
+            appendix_conf = config_element('appendix', '', {"phone_no" => "00-0000-0000"})
+            i.configure(config_element('ROOT', '', {}, [appendix_conf]))
+
+            assert_equal 2, i.appendix.code
+            assert_equal 0, i.appendix.age
+            assert_equal "00-0000-0000", i.appendix.phone_no
+          end
+
+          test 'finalized base class works as designed' do
+            b = ConfigurableSpec::Final::FinalizedBase.new
+            appendix_conf = config_element('options', '', {"name" => "moris"})
+
+            assert_nothing_raised do
+              b.configure(config_element('ROOT', '', {}, [appendix_conf]))
+            end
+            assert b.apd
+            assert_equal "moris", b.apd.name
+          end
+
+          test 'subclass can change init' do
+            n = ConfigurableSpec::Final::OverwriteInit.new
+
+            assert_nothing_raised do
+              n.configure(config_element('ROOT', ''))
+            end
+            assert n.apd
+            assert_equal "moris", n.apd.name
+            assert_equal 0, n.apd.code
+          end
+
+          test 'subclass cannot change parameter types in finalized sections' do
+            s = ConfigurableSpec::Final::Subclass.new
+            appendix_conf = config_element('options', '', {"name" => "1"})
+
+            assert_nothing_raised do
+              s.configure(config_element('ROOT', '', {}, [appendix_conf]))
+            end
+            assert_equal "1", s.apd.name
+          end
+
+          test 'subclass cannot change param_name of finalized section' do
+            assert_raise(Fluent::ConfigError.new("BUG: subclass cannot overwrite base class's config_section: param_name")) do
+              ConfigurableSpec::Final::OverwriteParamName.new
+            end
+          end
+
+          test 'subclass cannot change final of finalized section' do
+            assert_raise(Fluent::ConfigError.new("BUG: subclass cannot overwrite finalized base class's config_section")) do
+              ConfigurableSpec::Final::OverwriteFinal.new
+            end
+          end
+
+          test 'subclass cannot change required of finalized section' do
+            assert_raise(Fluent::ConfigError.new("BUG: subclass cannot overwrite base class's config_section: required")) do
+              ConfigurableSpec::Final::OverwriteRequired.new
+            end
+          end
+
+          test 'subclass cannot change multi of finalized section' do
+            assert_raise(Fluent::ConfigError.new("BUG: subclass cannot overwrite base class's config_section: multi")) do
+              ConfigurableSpec::Final::OverwriteMulti.new
+            end
+          end
+
+          test 'subclass cannot change alias of finalized section' do
+            assert_raise(Fluent::ConfigError.new("BUG: subclass cannot overwrite base class's config_section: alias")) do
+              ConfigurableSpec::Final::OverwriteAlias.new
+            end
+          end
         end
       end
     end
@@ -656,20 +999,92 @@ module Fluent::Config
       end
 
       sub_test_case '#configure' do
-        def e(name, arg = '', attrs = {}, elements = [])
-          attrs_str_keys = {}
-          attrs.each{|key, value| attrs_str_keys[key.to_s] = value }
-          Fluent::Config::Element.new(name, arg, attrs_str_keys, elements)
-        end
-
         test 'provides accessible data for alias attribute keys' do
           ex1 = ConfigurableSpec::Example1.new
-          ex1.configure(e('ROOT', '', {"fullname" => "foo bar", "bool" => false}, [e('information', '', {"address" => "Mountain View 0"})]))
+          conf = config_element('ROOT', '', {
+                                  "fullname" => "foo bar",
+                                  "bool" => false
+                                },
+                                [config_element('information', '', {"address" => "Mountain View 0"})])
+          ex1.configure(conf)
           assert_equal("foo bar", ex1.name)
           assert_not_nil(ex1.bool)
           assert_false(ex1.bool)
           assert_not_nil(ex1.detail)
           assert_equal("Mountain View 0", ex1.detail.address)
+        end
+      end
+    end
+
+    sub_test_case 'defaults can be overwritten by owner' do
+      test 'for feature plugin which has flat parameters with parent' do
+        owner = ConfigurableSpec::OverwriteDefaults::Owner.new
+        child = ConfigurableSpec::OverwriteDefaults::FlatChild.new
+        child.owner = owner
+        child.configure(config_element('ROOT', '', {}, []))
+        assert_equal "V1", child.key1
+      end
+
+      test 'for feature plugin which has parameters in subsection of parent' do
+        owner = ConfigurableSpec::OverwriteDefaults::Owner.new
+        child = ConfigurableSpec::OverwriteDefaults::BufferChild.new
+        child.owner = owner
+        child.configure(config_element('ROOT', '', {}, []))
+        assert_equal 1024, child.size_of_something
+      end
+    end
+
+    sub_test_case ':secret option' do
+      setup do
+        @conf = config_element('ROOT', '',
+                               {
+                                 'normal_param' => 'normal',
+                                 'secret_param' => 'secret'
+                               },
+                               [config_element('section', '', {'normal_param2' => 'normal', 'secret_param2' => 'secret'} )])
+        @example = ConfigurableSpec::Example5.new
+        @example.configure(@conf)
+      end
+
+      test 'to_s hides secret config_param' do
+        @conf.to_s.each_line { |line|
+          key, value = line.strip.split(' ', 2)
+          assert_secret_param(key, value)
+        }
+      end
+
+      test 'config returns masked configuration' do
+        conf = @example.config
+        conf.each_pair { |key, value|
+          assert_secret_param(key, value)
+        }
+        conf.elements.each { |element|
+          element.each_pair { |key, value|
+            assert_secret_param(key, value)
+          }
+        }
+      end
+
+      test 'get plugin name when found unknown section' do
+        @conf = config_element('ROOT', '',
+                               {
+                                 'normal_param' => 'normal',
+                                 'secret_param' => 'secret'
+                               },
+                               [config_element('unknown', '', {'normal_param2' => 'normal', 'secret_param2' => 'secret'} )])
+        @example = ConfigurableSpec::Example5.new
+        @example.configure(@conf)
+        @conf.elements.each { |e|
+          assert_equal(['ROOT', nil], e.unused_in)
+        }
+      end
+
+      def assert_secret_param(key, value)
+        case key
+        when 'normal_param', 'normal_param2'
+          assert_equal 'normal', value
+        when 'secret_param', 'secret_param2'
+          assert_equal 'xxxxxx', value
         end
       end
     end

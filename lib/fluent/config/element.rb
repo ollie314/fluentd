@@ -14,9 +14,10 @@
 #    limitations under the License.
 #
 
-module Fluent
-  require 'fluent/config/error'
+require 'fluent/config/error'
+require 'fluent/config/literal_parser'
 
+module Fluent
   module Config
     class Element < Hash
       def initialize(name, arg, attrs, elements, unused = nil)
@@ -29,11 +30,38 @@ module Fluent
         }
         @unused = unused || attrs.keys
         @v1_config = false
+        @corresponding_proxies = [] # some plugins use flat parameters, e.g. in_http doesn't provide <format> section for parser.
+        @unused_in = false # if this element is not used in plugins, correspoing plugin name and parent element name is set, e.g. [source, plugin class].
+
+        # it's global logger, not plugin logger: deprecated message should be global warning, not plugin level.
+        @logger = defined?($log) ? $log : nil
       end
 
-      attr_accessor :name, :arg, :elements, :unused, :v1_config
+      attr_accessor :name, :arg, :unused, :v1_config, :corresponding_proxies, :unused_in
+      attr_writer :elements
 
-      def add_element(name, arg='')
+      RESERVED_PARAMETERS_COMPAT = {
+        '@type' => 'type',
+        '@id' => 'id',
+        '@log_level' => 'log_level',
+        '@label' => nil,
+      }
+      RESERVED_PARAMETERS = RESERVED_PARAMETERS_COMPAT.keys
+
+      def elements(*names, name: nil, arg: nil)
+        raise ArgumentError, "name and names are exclusive" if name && !names.empty?
+        raise ArgumentError, "arg is available only with name" if arg && !name
+
+        if name
+          @elements.select{|e| e.name == name && (!arg || e.arg == arg) }
+        elsif !names.empty?
+          @elements.select{|e| names.include?(e.name) }
+        else
+          @elements
+        end
+      end
+
+      def add_element(name, arg = '')
         e = Element.new(name, arg, {}, [])
         e.v1_config = @v1_config
         @elements << e
@@ -60,6 +88,7 @@ module Fluent
         e
       end
 
+      # no code in fluentd uses this method
       def each_element(*names, &block)
         if names.empty?
           @elements.each(&block)
@@ -73,12 +102,20 @@ module Fluent
       end
 
       def has_key?(key)
+        @unused_in = false # some sections, e.g. <store> in copy, is not defined by config_section so clear unused flag for better warning message in chgeck_not_fetched.
         @unused.delete(key)
         super
       end
 
       def [](key)
+        @unused_in = false # ditto
         @unused.delete(key)
+
+        if RESERVED_PARAMETERS.include?(key) && !has_key?(key) && has_key?(RESERVED_PARAMETERS_COMPAT[key])
+          @logger.warn "'#{RESERVED_PARAMETERS_COMPAT[key]}' is deprecated parameter name. use '#{key}' instead." if @logger
+          return self[RESERVED_PARAMETERS_COMPAT[key]]
+        end
+
         super
       end
 
@@ -103,13 +140,72 @@ module Fluent
           out << "#{indent}<#{@name} #{@arg}>\n"
         end
         each_pair { |k, v|
-          out << "#{nindent}#{k} #{v}\n"
+          out << dump_value(k, v, indent, nindent)
         }
         @elements.each { |e|
           out << e.to_s(nest + 1)
         }
         out << "#{indent}</#{@name}>\n"
         out
+      end
+
+      def to_masked_element
+        new_elems = @elements.map { |e| e.to_masked_element }
+        new_elem = Element.new(@name, @arg, {}, new_elems, @unused)
+        new_elem.v1_config = @v1_config
+        new_elem.corresponding_proxies = @corresponding_proxies
+        each_pair { |k, v|
+          new_elem[k] = secret_param?(k) ? 'xxxxxx' : v
+        }
+        new_elem
+      end
+
+      def secret_param?(key)
+        return false if @corresponding_proxies.empty?
+
+        param_key = key.to_sym
+        @corresponding_proxies.each { |proxy|
+          _block, opts = proxy.params[param_key]
+          if opts && opts.has_key?(:secret)
+            return opts[:secret]
+          end
+        }
+
+        false
+      end
+
+      def param_type(key)
+        return nil if @corresponding_proxies.empty?
+
+        param_key = key.to_sym
+        proxy = @corresponding_proxies.detect do |_proxy|
+          _proxy.params.has_key?(param_key)
+        end
+        return nil unless proxy
+        _block, opts = proxy.params[param_key]
+        opts[:type]
+      end
+
+      def dump_value(k, v, indent, nindent)
+        if secret_param?(k)
+          "#{nindent}#{k} xxxxxx\n"
+        else
+          if @v1_config
+            case param_type(k)
+            when :string
+              "#{nindent}#{k} \"#{self.class.unescape_parameter(v)}\"\n"
+            when :enum, :integer, :float, :size, :bool, :time
+              "#{nindent}#{k} #{v}\n"
+            when :hash, :array
+              "#{nindent}#{k} #{v}\n"
+            else
+              # Unknown type
+              "#{nindent}#{k} #{v}\n"
+            end
+          else
+            "#{nindent}#{k} #{v}\n"
+          end
+        end
       end
 
       def self.unescape_parameter(v)

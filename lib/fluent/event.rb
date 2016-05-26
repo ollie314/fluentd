@@ -14,9 +14,17 @@
 #    limitations under the License.
 #
 
+require 'fluent/msgpack_factory'
+
 module Fluent
   class EventStream
     include Enumerable
+    include MessagePackFactory::Mixin
+
+    def size
+      raise NotImplementedError, "DO NOT USE THIS CLASS directly."
+    end
+    alias :length :size
 
     def repeatable?
       false
@@ -26,15 +34,23 @@ module Fluent
       raise NotImplementedError, "DO NOT USE THIS CLASS directly."
     end
 
-    def to_msgpack_stream
-      out = MessagePack::Packer.new # MessagePack::Packer is fastest way to serialize events
+    def to_msgpack_stream(time_int: false)
+      return to_msgpack_stream_forced_integer if time_int
+      out = msgpack_packer
       each {|time,record|
         out.write([time,record])
       }
       out.to_s
     end
-  end
 
+    def to_msgpack_stream_forced_integer
+      out = msgpack_packer
+      each {|time,record|
+        out.write([time.to_i,record])
+      }
+      out.to_s
+    end
+  end
 
   class OneEventStream < EventStream
     def initialize(time, record)
@@ -44,6 +60,10 @@ module Fluent
 
     def dup
       OneEventStream.new(@time, @record.dup)
+    end
+
+    def size
+      1
     end
 
     def repeatable?
@@ -70,6 +90,10 @@ module Fluent
       ArrayEventStream.new(entries)
     end
 
+    def size
+      @entries.size
+    end
+
     def repeatable?
       true
     end
@@ -91,7 +115,7 @@ module Fluent
   #
   # Use this class as below, in loop of data-enumeration:
   #  1. initialize blank stream:
-  #     streams[tag] ||= MultiEventStream
+  #     streams[tag] ||= MultiEventStream.new
   #  2. add events
   #     stream[tag].add(time, record)
   class MultiEventStream < EventStream
@@ -106,6 +130,10 @@ module Fluent
         es.add(time, record.dup)
       }
       es
+    end
+
+    def size
+      @time_array.size
     end
 
     def add(time, record)
@@ -133,8 +161,13 @@ module Fluent
 
   class MessagePackEventStream < EventStream
     # Keep cached_unpacker argument for existence plugins
-    def initialize(data, cached_unpacker = nil)
+    def initialize(data, cached_unpacker = nil, size = 0)
       @data = data
+      @size = size
+    end
+
+    def size
+      @size
     end
 
     def repeatable?
@@ -142,15 +175,31 @@ module Fluent
     end
 
     def each(&block)
-      # TODO format check
-      unpacker = MessagePack::Unpacker.new
-      unpacker.feed_each(@data, &block)
+      msgpack_unpacker.feed_each(@data, &block)
       nil
     end
 
-    def to_msgpack_stream
+    def to_msgpack_stream(time_int: false)
+      # time_int is always ignored because @data is always packed binary in this class
       @data
     end
   end
-end
 
+  module ChunkMessagePackEventStreamer
+    include MessagePackFactory::Mixin
+    # chunk.extend(ChunkEventStreamer)
+    #  => chunk.each{|time, record| ... }
+    def each(&block)
+      open do |io|
+        msgpack_unpacker(io).each(&block)
+      end
+      nil
+    end
+    alias :msgpack_each :each
+
+    def to_msgpack_stream(time_int: false)
+      # time_int is always ignored because data is already packed and written in chunk
+      read
+    end
+  end
+end

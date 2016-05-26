@@ -48,11 +48,33 @@ module FormatterTest
     end
   end
 
+  class BaseFormatterTestWithTestDriver < ::Test::Unit::TestCase
+    include FormatterTest
+
+    def create_driver(conf={})
+      Fluent::Test::FormatterTestDriver.new(Formatter).configure(conf)
+    end
+
+    def test_call
+      d = create_driver
+      assert_raise NotImplementedError do
+        d.format('tag', Engine.now, {})
+      end
+    end
+
+    def test_call_with_string_literal_configure
+      d = create_driver('')
+      assert_raise NotImplementedError do
+        d.format('tag', Engine.now, {})
+      end
+    end
+  end
+
   class OutFileFormatterTest < ::Test::Unit::TestCase
     include FormatterTest
 
     def setup
-      @formatter = TextFormatter::TEMPLATE_REGISTRY.lookup('out_file').call
+      @formatter = Fluent::Test::FormatterTestDriver.new('out_file')
       @time = Engine.now
     end
 
@@ -87,25 +109,38 @@ module FormatterTest
 
       assert_equal("#{Yajl.dump(record)}\n", formatted)
     end
+
+    def test_format_without_time_and_tag_against_string_literal_configure
+      @formatter.configure(%[
+        utc         true
+        output_tag  false
+        output_time false
+      ])
+      formatted = @formatter.format('tag', @time, record)
+
+      assert_equal("#{Yajl.dump(record)}\n", formatted)
+    end
   end
 
   class JsonFormatterTest < ::Test::Unit::TestCase
     include FormatterTest
 
     def setup
-      @formatter = TextFormatter::JSONFormatter.new
+      @formatter = Fluent::Test::FormatterTestDriver.new(TextFormatter::JSONFormatter)
       @time = Engine.now
     end
 
-    def test_format
-      @formatter.configure({})
+    data('oj' => 'oj', 'yajl' => 'yajl')
+    def test_format(data)
+      @formatter.configure('json_parser' => data)
       formatted = @formatter.format(tag, @time, record)
 
       assert_equal("#{Yajl.dump(record)}\n", formatted)
     end
 
-    def test_format_with_include_tag
-      @formatter.configure('include_tag_key' => 'true', 'tag_key' => 'foo')
+    data('oj' => 'oj', 'yajl' => 'yajl')
+    def test_format_with_include_tag(data)
+      @formatter.configure('include_tag_key' => 'true', 'tag_key' => 'foo', 'json_parser' => data)
       formatted = @formatter.format(tag, @time, record.dup)
 
       r = record
@@ -113,8 +148,9 @@ module FormatterTest
       assert_equal("#{Yajl.dump(r)}\n", formatted)
     end
 
-    def test_format_with_include_time
-      @formatter.configure('include_time_key' => 'true', 'localtime' => '')
+    data('oj' => 'oj', 'yajl' => 'yajl')
+    def test_format_with_include_time(data)
+      @formatter.configure('include_time_key' => 'true', 'localtime' => '', 'json_parser' => data)
       formatted = @formatter.format(tag, @time, record.dup)
 
       r = record
@@ -122,8 +158,9 @@ module FormatterTest
       assert_equal("#{Yajl.dump(r)}\n", formatted)
     end
 
-    def test_format_with_include_time_as_number
-      @formatter.configure('include_time_key' => 'true', 'time_as_epoch' => 'true', 'time_key' => 'epoch')
+    data('oj' => 'oj', 'yajl' => 'yajl')
+    def test_format_with_include_time_as_number(data)
+      @formatter.configure('include_time_key' => 'true', 'time_as_epoch' => 'true', 'time_key' => 'epoch', 'json_parser' => data)
       formatted = @formatter.format(tag, @time, record.dup)
 
       r = record
@@ -353,13 +390,13 @@ module FormatterTest
     end
 
     def test_format
-      formatter = TextFormatter::TEMPLATE_REGISTRY.lookup('single_value').call
+      formatter = Fluent::Plugin.new_formatter('single_value')
       formatted = formatter.format('tag', Engine.now, {'message' => 'awesome'})
       assert_equal("awesome\n", formatted)
     end
 
     def test_format_without_newline
-      formatter = TextFormatter::TEMPLATE_REGISTRY.lookup('single_value').call
+      formatter = Fluent::Plugin.new_formatter('single_value')
       formatter.configure('add_newline' => 'false')
       formatted = formatter.format('tag', Engine.now, {'message' => 'awesome'})
       assert_equal("awesome", formatted)
@@ -379,7 +416,7 @@ module FormatterTest
 
     def test_unknown_format
       assert_raise ConfigError do
-        TextFormatter::TEMPLATE_REGISTRY.lookup('unknown')
+        Fluent::Plugin.new_formatter('unknown')
       end
     end
 
@@ -387,7 +424,7 @@ module FormatterTest
     def test_find_formatter(data)
       $LOAD_PATH.unshift(File.join(File.expand_path(File.dirname(__FILE__)), 'scripts'))
       assert_nothing_raised ConfigError do
-        TextFormatter::TEMPLATE_REGISTRY.lookup(data)
+        Fluent::Plugin.new_formatter(data)
       end
       $LOAD_PATH.shift
     end
@@ -562,6 +599,12 @@ module FormatterTest
       with_timezone("UTC-09") do
         assert_equal("20140926 1400-1000", format(@fmt, true, "-10"))
       end
+    end
+
+    def test_format_with_subsec
+      time = Fluent::EventTime.new(@time)
+      formatter = Fluent::TimeFormatter.new("%Y%m%d %H%M.%N", false, nil)
+      assert_equal("20140927 0000.000000000", formatter.format(time))
     end
   end
 

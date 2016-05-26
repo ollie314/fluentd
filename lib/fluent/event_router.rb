@@ -13,9 +13,12 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 #
-module Fluent
-  require 'fluent/match'
 
+require 'fluent/match'
+require 'fluent/event'
+require 'fluent/filter'
+
+module Fluent
   #
   # EventRouter is responsible to route events to a collector.
   #
@@ -43,7 +46,6 @@ module Fluent
       @match_cache = MatchCache.new
       @default_collector = default_collector
       @emit_error_handler = emit_error_handler
-      @chain = NullOutputChain.instance
     end
 
     attr_accessor :default_collector
@@ -85,7 +87,7 @@ module Fluent
     end
 
     def emit_stream(tag, es)
-      match(tag).emit(tag, es, @chain)
+      match(tag).emit_events(tag, es)
     rescue => e
       @emit_error_handler.handle_emits_error(tag, es, e)
     end
@@ -100,7 +102,7 @@ module Fluent
 
     def match(tag)
       collector = @match_cache.get(tag) {
-        c = find(tag) || @default_collector
+        find(tag) || @default_collector
       }
       collector
     end
@@ -144,12 +146,12 @@ module Fluent
         @output = output
       end
 
-      def emit(tag, es, chain)
+      def emit_events(tag, es)
         processed = es
         @filters.each { |filter|
           processed = filter.filter_stream(tag, processed)
         }
-        @output.emit(tag, processed, chain)
+        @output.emit_events(tag, processed)
       end
     end
 

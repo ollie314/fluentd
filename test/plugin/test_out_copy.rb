@@ -1,5 +1,6 @@
 require_relative '../helper'
 require 'fluent/test'
+require 'fluent/plugin/out_copy'
 
 class CopyOutputTest < Test::Unit::TestCase
   class << self
@@ -86,7 +87,7 @@ class CopyOutputTest < Test::Unit::TestCase
 
     es = if defined?(MessagePack::Packer)
            time = Time.parse("2013-05-26 06:37:22 UTC").to_i
-           packer = MessagePack::Packer.new
+           packer = Fluent::Engine.msgpack_factory.packer
            packer.pack([time, {"a" => 1}])
            packer.pack([time, {"a" => 2}])
            Fluent::MessagePackEventStream.new(packer.to_s)
@@ -107,7 +108,19 @@ class CopyOutputTest < Test::Unit::TestCase
 
   def create_event_test_driver(is_deep_copy = false)
     deep_copy_config = %[
-deep_copy true
+deep_copy #{is_deep_copy}
+    <store>
+      type test
+      name c0
+    </store>
+    <store>
+      type test
+      name c1
+    </store>
+    <store>
+      type test
+      name c2
+    </store>
 ]
 
     output1 = Fluent::Plugin.new_output('test')
@@ -130,7 +143,7 @@ deep_copy true
     outputs = [output1, output2]
 
     d = Fluent::Test::OutputTestDriver.new(Fluent::CopyOutput)
-    d = d.configure(deep_copy_config) if is_deep_copy
+    d = d.configure(deep_copy_config)
     d.instance.instance_eval { @outputs = outputs }
     d
   end

@@ -14,11 +14,13 @@
 #    limitations under the License.
 #
 
+require 'uri'
+
+require 'fluent/config/error'
+require 'fluent/config/element'
+
 module Fluent
   module Config
-    require 'fluent/config/error'
-    require 'fluent/config/element'
-
     class Parser
       def self.parse(io, fname, basepath = Dir.pwd)
         attrs, elems = Parser.new(basepath, io.each_line, fname).parse!(true)
@@ -79,10 +81,10 @@ module Fluent
             pattern = path
           end
 
-          Dir.glob(pattern).sort.each { |path|
-            basepath = File.dirname(path)
-            fname = File.basename(path)
-            File.open(path) { |f|
+          Dir.glob(pattern).sort.each { |entry|
+            basepath = File.dirname(entry)
+            fname = File.basename(entry)
+            File.open(entry) { |f|
               Parser.new(basepath, f.each_line, fname).parse!(allow_include, nil, attrs, elems)
             }
           }

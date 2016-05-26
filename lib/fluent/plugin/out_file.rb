@@ -14,8 +14,17 @@
 #    limitations under the License.
 #
 
+require 'fileutils'
+require 'zlib'
+
+require 'fluent/output'
+require 'fluent/config/error'
+require 'fluent/system_config'
+
 module Fluent
   class FileOutput < TimeSlicedOutput
+    include SystemConfig::Mixin
+
     Plugin.register_output('file', self)
 
     SUPPORTED_COMPRESS = {
@@ -23,17 +32,40 @@ module Fluent
       'gzip' => :gz,
     }
 
+    FILE_PERMISSION = 0644
+    DIR_PERMISSION = 0755
+
+    desc "The Path of the file."
     config_param :path, :string
-    config_param :format, :string, :default => 'out_file'
-    config_param :append, :bool, :default => false
-    config_param :compress, :default => nil do |val|
+    desc "The format of the file content. The default is out_file."
+    config_param :format, :string, default: 'out_file', skip_accessor: true
+    desc "The flushed chunk is appended to existence file or not."
+    config_param :append, :bool, default: false
+    desc "Compress flushed file."
+    config_param :compress, default: nil do |val|
       c = SUPPORTED_COMPRESS[val]
       unless c
         raise ConfigError, "Unsupported compression algorithm '#{val}'"
       end
       c
     end
-    config_param :symlink_path, :string, :default => nil
+    desc "Create symlink to temporary buffered file when buffer_type is file."
+    config_param :symlink_path, :string, default: nil
+
+    module SymlinkBufferMixin
+      def symlink_path=(path)
+        @_symlink_path = path
+      end
+
+      def generate_chunk(metadata)
+        chunk = super
+        latest_chunk = metadata_list.sort_by(&:timekey).last
+        if chunk.metadata == latest_chunk
+          FileUtils.ln_sf(chunk.path, @_symlink_path)
+        end
+        chunk
+      end
+    end
 
     def initialize
       require 'zlib'
@@ -70,7 +102,15 @@ module Fluent
       @formatter = Plugin.new_formatter(@format)
       @formatter.configure(conf)
 
-      @buffer.symlink_path = @symlink_path if @symlink_path
+      if @symlink_path && @buffer.respond_to?(:path)
+        (class << @buffer; self; end).module_eval do
+          prepend SymlinkBufferMixin
+        end
+        @buffer.symlink_path = @symlink_path
+      end
+
+      @dir_perm = system_config.dir_permission || DIR_PERMISSION
+      @file_perm = system_config.file_permission || FILE_PERMISSION
     end
 
     def format(tag, time, record)
@@ -79,15 +119,15 @@ module Fluent
 
     def write(chunk)
       path = generate_path(chunk.key)
-      FileUtils.mkdir_p File.dirname(path), :mode => DEFAULT_DIR_PERMISSION
+      FileUtils.mkdir_p File.dirname(path), mode: @dir_perm
 
       case @compress
       when nil
-        File.open(path, "a", DEFAULT_FILE_PERMISSION) {|f|
+        File.open(path, "ab", @file_perm) {|f|
           chunk.write_to(f)
         }
       when :gz
-        File.open(path, "a", DEFAULT_FILE_PERMISSION) {|f|
+        File.open(path, "ab", @file_perm) {|f|
           gz = Zlib::GzipWriter.new(f)
           chunk.write_to(gz)
           gz.close

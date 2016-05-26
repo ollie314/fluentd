@@ -13,13 +13,17 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 #
+
+require 'delegate'
+
+require 'fluent/config/error'
+require 'fluent/agent'
+require 'fluent/label'
+require 'fluent/plugin'
+require 'fluent/system_config'
+require 'fluent/time'
+
 module Fluent
-
-  require 'delegate'
-
-  require 'fluent/agent'
-  require 'fluent/label'
-
   #
   # Fluentd forms a tree structure to manage plugins:
   #
@@ -43,17 +47,17 @@ module Fluent
   class RootAgent < Agent
     ERROR_LABEL = "@ERROR".freeze # @ERROR is built-in error label
 
-    def initialize(opts = {})
-      super
+    def initialize(log:, system_config: SystemConfig.new)
+      super(log: log)
 
       @labels = {}
       @inputs = []
-      @started_inputs = []
       @suppress_emit_error_log_interval = 0
       @next_emit_error_log_time = nil
+      @without_source = false
 
-      suppress_interval(opts[:suppress_interval]) if opts[:suppress_interval]
-      @without_source = opts[:without_source] if opts[:without_source]
+      suppress_interval(system_config.emit_error_log_interval) unless system_config.emit_error_log_interval.nil?
+      @without_source = system_config.without_source unless system_config.without_source.nil?
     end
 
     attr_reader :inputs
@@ -64,7 +68,7 @@ module Fluent
 
       # initialize <label> elements before configuring all plugins to avoid 'label not found' in input, filter and output.
       label_configs = {}
-      conf.elements.select { |e| e.name == 'label' }.each { |e|
+      conf.elements(name: 'label').each { |e|
         name = e.arg
         raise ConfigError, "Missing symbol argument on <label> directive" if name.empty?
 
@@ -85,8 +89,8 @@ module Fluent
       if @without_source
         log.info "'--without-source' is applied. Ignore <source> sections"
       else
-        conf.elements.select { |e| e.name == 'source' }.each { |e|
-          type = e['@type'] || e['type']
+        conf.elements(name: 'source').each { |e|
+          type = e['@type']
           raise ConfigError, "Missing 'type' parameter on <source> directive" unless type
           add_source(type, e)
         }
@@ -100,37 +104,110 @@ module Fluent
       @error_collector = error_label.event_router
     end
 
-    def start
-      super
-
-      @labels.each { |n, l|
-        l.start
-      }
-
-      @inputs.each { |i|
-        i.start
-        @started_inputs << i
-      }
+    def lifecycle(desc: false)
+      kind_or_label_list = if desc
+                    [:output, :filter, @labels.values.reverse, :output_with_router, :input].flatten
+                  else
+                    [:input, :output_with_router, @labels.values, :filter, :output].flatten
+                  end
+      kind_or_label_list.each do |kind|
+        if kind.respond_to?(:lifecycle)
+          label = kind
+          label.lifecycle(desc: desc) do |plugin, display_kind|
+            yield plugin, display_kind
+          end
+        else
+          list = if desc
+                   lifecycle_control_list[kind].reverse
+                 else
+                   lifecycle_control_list[kind]
+                 end
+          display_kind = (kind == :output_with_router ? :output : kind)
+          list.each do |instance|
+            yield instance, display_kind
+          end
+        end
+      end
     end
 
-    def shutdown
-      # Shutdown Input plugin first to prevent emitting to terminated Output plugin
-      @started_inputs.map { |i|
-        Thread.new do
+    def start
+      lifecycle(desc: true) do |i| # instance
+        i.start unless i.started?
+      end
+    end
+
+    def flush!
+      log.info "flushing all buffer forcedly"
+      flushing_threads = []
+      lifecycle(desc: true) do |instance|
+        if instance.respond_to?(:force_flush)
+          t = Thread.new do
+            Thread.current.abort_on_exception = true
+            begin
+              instance.force_flush
+            rescue => e
+              log.warn "unexpected error while flushing buffer", plugin: instance.class, plugin_id: instance.plugin_id, error: e
+              log.warn_backtrace
+            end
+          end
+          flushing_threads << t
+        end
+      end
+      flushing_threads.each{|t| t.join }
+    end
+
+    def shutdown # Fluentd's shutdown sequence is stop, before_shutdown, shutdown, after_shutdown, close, terminate for plugins
+      # Thesee method callers does `rescue Exception` to call methods of shutdown sequence as far as possible
+      # if plugin methods does something like infinite recursive call, `exit`, unregistering signal handlers or others.
+      # Plugins should be separated and be in sandbox to protect data in each plugins/buffers.
+
+      lifecycle_safe_sequence = ->(method, checker) {
+        lifecycle do |instance, kind|
           begin
-            i.shutdown
-          rescue => e
-            log.warn "unexpected error while shutting down input plugin", :plugin => i.class, :plugin_id => i.plugin_id, :error_class => e.class, :error => e
+            log.debug "calling #{method} on #{kind} plugin", type: Plugin.lookup_type_from_class(instance.class), plugin_id: instance.plugin_id
+            instance.send(method) unless instance.send(checker)
+          rescue Exception => e
+            log.warn "unexpected error while calling #{method} on #{kind} plugin", pluguin: instance.class, plugin_id: instance.plugin_id, error: e
             log.warn_backtrace
           end
         end
-      }.each { |t| t.join }
-
-      @labels.each { |n, l|
-        l.shutdown
       }
 
-      super
+      lifecycle_unsafe_sequence = ->(method, checker) {
+        operation = case method
+                    when :shutdown then "shutting down"
+                    when :close    then "closing"
+                    else
+                      raise "BUG: unknown method name '#{method}'"
+                    end
+        operation_threads = []
+        lifecycle do |instance, kind|
+          t = Thread.new do
+            Thread.current.abort_on_exception = true
+            begin
+              log.info "#{operation} #{kind} plugin", type: Plugin.lookup_type_from_class(instance.class), plugin_id: instance.plugin_id
+              instance.send(method) unless instance.send(checker)
+            rescue Exception => e
+              log.warn "unexpected error while #{operation} on #{kind} plugin", plugin: instance.class, plugin_id: instance.plugin_id, error: e
+              log.warn_backtrace
+            end
+          end
+          operation_threads << t
+        end
+        operation_threads.each{|t| t.join }
+      }
+
+      lifecycle_safe_sequence.call(:stop, :stopped?)
+
+      lifecycle_safe_sequence.call(:before_shutdown, :before_shutdown?)
+
+      lifecycle_unsafe_sequence.call(:shutdown, :shutdown?)
+
+      lifecycle_safe_sequence.call(:after_shutdown, :after_shutdown?)
+
+      lifecycle_unsafe_sequence.call(:close, :closed?)
+
+      lifecycle_safe_sequence.call(:terminate, :terminated?)
     end
 
     def suppress_interval(interval_time)
@@ -153,7 +230,7 @@ module Fluent
     end
 
     def add_label(name)
-      label = Label.new(name)
+      label = Label.new(name, log: log)
       label.root_agent = self
       @labels[name] = label
     end
@@ -167,7 +244,7 @@ module Fluent
     end
 
     def emit_error_event(tag, time, record, error)
-      error_info = {:error_class => error.class, :error => error.to_s, :tag => tag, :time => time}
+      error_info = {error: error, tag: tag, time: time}
       if @error_collector
         # A record is not included in the logs because <@ERROR> handles it. This warn is for the notification
         log.warn "send an error event to @ERROR:", error_info
@@ -179,12 +256,12 @@ module Fluent
     end
 
     def handle_emits_error(tag, es, error)
-      error_info = {:error_class => error.class, :error => error.to_s, :tag => tag}
+      error_info = {error: error, tag: tag}
       if @error_collector
         log.warn "send an error event stream to @ERROR:", error_info
         @error_collector.emit_stream(tag, es)
       else
-        now = Engine.now
+        now = Time.now
         if @suppress_emit_error_log_interval.zero? || now > @next_emit_error_log_time
           log.warn "emit transaction failed:", error_info
           log.warn_backtrace
@@ -208,14 +285,14 @@ module Fluent
       end
 
       def emit_error_event(tag, time, record, error)
-        error_info = {:error_class => error.class, :error => error.to_s, :tag => tag, :time => time, :record => record}
+        error_info = {error: error, tag: tag, time: time, record: record}
         log.warn "dump an error event in @ERROR:", error_info
       end
 
       def handle_emits_error(tag, es, e)
-        now = Engine.now
+        now = EventTime.now
         if @suppress_emit_error_log_interval.zero? || now > @next_emit_error_log_time
-          log.warn "emit transaction failed in @ERROR:", :error_class => e.class, :error => e, :tag => tag
+          log.warn "emit transaction failed in @ERROR:", error: e, tag: tag
           log.warn_backtrace
           @next_emit_error_log_time = now + @suppress_emit_error_log_interval
         end

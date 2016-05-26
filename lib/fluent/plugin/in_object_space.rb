@@ -14,6 +14,11 @@
 #    limitations under the License.
 #
 
+require 'cool.io'
+require 'yajl'
+
+require 'fluent/input'
+
 module Fluent
   class ObjectSpaceInput < Input
     Plugin.register_input('object_space', self)
@@ -22,9 +27,9 @@ module Fluent
       super
     end
 
-    config_param :emit_interval, :time, :default => 60
+    config_param :emit_interval, :time, default: 60
     config_param :tag, :string
-    config_param :top, :integer, :default => 15
+    config_param :top, :integer, default: 15
 
     class TimerWatcher < Coolio::TimerWatcher
       def initialize(interval, repeat, log, &callback)
@@ -47,6 +52,8 @@ module Fluent
     end
 
     def start
+      super
+
       @loop = Coolio::Loop.new
       @timer = TimerWatcher.new(@emit_interval, true, log, &method(:on_timer))
       @loop.attach(@timer)
@@ -57,12 +64,14 @@ module Fluent
       @loop.watchers.each {|w| w.detach }
       @loop.stop
       @thread.join
+
+      super
     end
 
     def run
       @loop.run
     rescue
-      log.error "unexpected error", :error=>$!.to_s
+      log.error "unexpected error", error: $!.to_s
       log.error_backtrace
     end
 
@@ -110,7 +119,8 @@ module Fluent
 
       router.emit(@tag, now, record)
     rescue => e
-      log.error "object space failed to emit", :error => e.to_s, :error_class => e.class.to_s, :tag => @tag, :record => Yajl.dump(record)
+      log.error "object space failed to emit", error: e, tag: @tag, record: Yajl.dump(record)
+      log.error_backtrace
     end
   end
 end

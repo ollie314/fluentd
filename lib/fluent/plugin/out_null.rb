@@ -14,23 +14,11 @@
 #    limitations under the License.
 #
 
+require 'fluent/output'
+
 module Fluent
   class NullOutput < Output
     Plugin.register_output('null', self)
-
-    def initialize
-      super
-    end
-
-    def configure(conf)
-      super
-    end
-
-    def start
-    end
-
-    def shutdown
-    end
 
     def emit(tag, es, chain)
       chain.next

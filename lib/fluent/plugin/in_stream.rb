@@ -14,10 +14,19 @@
 #    limitations under the License.
 #
 
+require 'fileutils'
+require 'socket'
+
+require 'cool.io'
+require 'yajl'
+
+require 'fluent/input'
+require 'fluent/event'
+
 module Fluent
   # obsolete
   class StreamInput < Input
-    config_param :blocking_timeout, :time, :default => 0.5
+    config_param :blocking_timeout, :time, default: 0.5
 
     def initialize
       require 'socket'
@@ -26,6 +35,8 @@ module Fluent
     end
 
     def start
+      super
+
       @loop = Coolio::Loop.new
       @lsock = listen
       @loop.attach(@lsock)
@@ -37,6 +48,8 @@ module Fluent
       @loop.stop
       @lsock.close
       @thread.join
+
+      super
     end
 
     #def listen
@@ -45,7 +58,7 @@ module Fluent
     def run
       @loop.run(@blocking_timeout)
     rescue
-      log.error "unexpected error", :error=>$!.to_s
+      log.error "unexpected error", error: $!.to_s
       log.error_backtrace
     end
 
@@ -87,8 +100,8 @@ module Fluent
         entries.each {|e|
           record = e[1]
           next if record.nil?
-          time = e[0].to_i
-          time = (now ||= Engine.now) if time == 0
+          time = e[0]
+          time = (now ||= Engine.now) if time.to_i == 0
           es.add(time, record)
         }
         router.emit_stream(tag, es)
@@ -99,7 +112,7 @@ module Fluent
         return if record.nil?
 
         time = msg[1]
-        time = Engine.now if time == 0
+        time = Engine.now if time.to_i == 0
         router.emit(tag, time, record)
       end
     end
@@ -130,7 +143,7 @@ module Fluent
           @y.on_parse_complete = @on_message
         else
           m = method(:on_read_msgpack)
-          @u = MessagePack::Unpacker.new
+          @u = Fluent::Engine.msgpack_factory.unpacker
         end
 
         (class << self; self; end).module_eval do
@@ -142,7 +155,7 @@ module Fluent
       def on_read_json(data)
         @y << data
       rescue
-        @log.error "unexpected error", :error=>$!.to_s
+        @log.error "unexpected error", error: $!.to_s
         @log.error_backtrace
         close
       end
@@ -150,7 +163,7 @@ module Fluent
       def on_read_msgpack(data)
         @u.feed_each(data, &@on_message)
       rescue
-        @log.error "unexpected error", :error=>$!.to_s
+        @log.error "unexpected error", error: $!.to_s
         @log.error_backtrace
         close
       end
@@ -164,8 +177,10 @@ module Fluent
   class UnixInput < StreamInput
     Plugin.register_input('unix', self)
 
-    config_param :path, :string, :default => DEFAULT_SOCKET_PATH
-    config_param :backlog, :integer, :default => nil
+    desc 'The path to your Unix Domain Socket.'
+    config_param :path, :string, default: DEFAULT_SOCKET_PATH
+    desc 'The backlog of Unix Domain Socket.'
+    config_param :backlog, :integer, default: nil
 
     def configure(conf)
       super
@@ -177,7 +192,7 @@ module Fluent
         File.unlink(@path)
       end
       FileUtils.mkdir_p File.dirname(@path)
-      log.debug "listening fluent socket on #{@path}"
+      log.info "listening fluent socket on #{@path}"
       s = Coolio::UNIXServer.new(@path, Handler, log, method(:on_message))
       s.listen(@backlog) unless @backlog.nil?
       s

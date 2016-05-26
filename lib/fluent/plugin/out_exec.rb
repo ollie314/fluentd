@@ -14,29 +14,42 @@
 #    limitations under the License.
 #
 
+require 'tempfile'
+
+require 'fluent/plugin/output'
+require 'fluent/config/error'
 require 'fluent/plugin/exec_util'
+require 'fluent/mixin' # for TimeFormatter
 
-module Fluent
-  class ExecOutput < TimeSlicedOutput
-    Plugin.register_output('exec', self)
+module Fluent::Plugin
+  class ExecOutput < Output
+    Fluent::Plugin.register_output('exec', self)
 
-    def initialize
-      super
-      require 'tempfile'
-      @localtime = false
-    end
+    helpers :compat_parameters
 
+    desc 'The command (program) to execute. The exec plugin passes the path of a TSV file as the last argumen'
     config_param :command, :string
-    config_param :keys, :default => [] do |val|
+    desc 'Specify the comma-separated keys when using the tsv format.'
+    config_param :keys, default: [] do |val|
       val.split(',')
     end
-    config_param :tag_key, :string, :default => nil
-    config_param :time_key, :string, :default => nil
-    config_param :time_format, :string, :default => nil
-    config_param :format, :default => :tsv do |val|
+    desc 'The name of the key to use as the event tag. This replaces the value in the event record.'
+    config_param :tag_key, :string, default: nil
+    desc 'The name of the key to use as the event time. This replaces the the value in the event record.'
+    config_param :time_key, :string, default: nil
+    desc 'The format for event time used when the time_key parameter is specified. The default is UNIX time (integer).'
+    config_param :time_format, :string, default: nil
+    desc "The format used to map the incoming events to the program input. (#{ExecUtil::SUPPORTED_FORMAT.keys.join(',')})"
+    config_param :format, default: :tsv, skip_accessor: true do |val|
       f = ExecUtil::SUPPORTED_FORMAT[val]
       raise ConfigError, "Unsupported format '#{val}'" unless f
       f
+    end
+    config_param :localtime, :bool, default: false
+    config_param :timezone, :string, default: nil
+
+    def compat_parameters_default_chunk_key
+      'time'
     end
 
     def configure(conf)
@@ -45,7 +58,7 @@ module Fluent
       @formatter = case @format
                    when :tsv
                      if @keys.empty?
-                       raise ConfigError, "keys option is required on exec output for tsv format"
+                       raise Fluent::ConfigError, "keys option is required on exec output for tsv format"
                      end
                      ExecUtil::TSVFormatter.new(@keys)
                    when :json
@@ -56,7 +69,7 @@ module Fluent
 
       if @time_key
         if @time_format
-          tf = TimeFormatter.new(@time_format, @localtime, @timezone)
+          tf = Fluent::TimeFormatter.new(@time_format, @localtime, @timezone)
           @time_format_proc = tf.method(:format)
         else
           @time_format_proc = Proc.new { |time| time.to_s }
@@ -81,6 +94,7 @@ module Fluent
         prog = "#{@command} #{chunk.path}"
       else
         tmpfile = Tempfile.new("fluent-plugin-exec-")
+        tmpfile.binmode
         chunk.write_to(tmpfile)
         tmpfile.close
         prog = "#{@command} #{tmpfile.path}"

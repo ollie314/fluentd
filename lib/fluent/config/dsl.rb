@@ -14,7 +14,10 @@
 #    limitations under the License.
 #
 
+require 'json'
+
 require 'fluent/config'
+require 'fluent/config/element'
 
 module Fluent
   module Config
@@ -72,6 +75,10 @@ module Fluent
           @attrs    = {}
           @elements = []
           @proxy    = proxy
+        end
+
+        def to_int
+          __id__
         end
 
         def method_missing(name, *args, &block)

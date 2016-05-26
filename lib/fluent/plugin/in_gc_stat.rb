@@ -14,6 +14,10 @@
 #    limitations under the License.
 #
 
+require 'cool.io'
+
+require 'fluent/input'
+
 module Fluent
   class GCStatInput < Input
     Plugin.register_input('gc_stat', self)
@@ -22,7 +26,7 @@ module Fluent
       super
     end
 
-    config_param :emit_interval, :time, :default => 60
+    config_param :emit_interval, :time, default: 60
     config_param :tag, :string
 
     class TimerWatcher < Coolio::TimerWatcher
@@ -46,6 +50,8 @@ module Fluent
     end
 
     def start
+      super
+
       @loop = Coolio::Loop.new
       @timer = TimerWatcher.new(@emit_interval, true, log, &method(:on_timer))
       @loop.attach(@timer)
@@ -56,12 +62,14 @@ module Fluent
       @loop.watchers.each {|w| w.detach }
       @loop.stop
       @thread.join
+
+      super
     end
 
     def run
       @loop.run
     rescue
-      log.error "unexpected error", :error=>$!.to_s
+      log.error "unexpected error", error: $!.to_s
       log.error_backtrace
     end
 

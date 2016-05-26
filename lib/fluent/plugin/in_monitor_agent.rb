@@ -14,19 +14,24 @@
 #    limitations under the License.
 #
 
+require 'json'
+require 'webrick'
+require 'cgi'
+
+require 'cool.io'
+
+require 'fluent/input'
+require 'fluent/output'
+require 'fluent/filter'
+
 module Fluent
   class MonitorAgentInput < Input
     Plugin.register_input('monitor_agent', self)
 
-    require 'webrick'
-
-    def initialize
-      require 'cgi'
-      super
-    end
-
-    config_param :bind, :string, :default => '0.0.0.0'
-    config_param :port, :integer, :default => 24220
+    config_param :bind, :string, default: '0.0.0.0'
+    config_param :port, :integer, default: 24220
+    config_param :tag, :string, default: nil
+    config_param :emit_interval, :time, default: 60
 
     class MonitorServlet < WEBrick::HTTPServlet::AbstractServlet
       def initialize(server, agent)
@@ -199,13 +204,45 @@ module Fluent
       end
     end
 
+    class TimerWatcher < Coolio::TimerWatcher
+      def initialize(interval, log, &callback)
+        @callback = callback
+        @log = log
+
+        # Avoid long shutdown time
+        @num_call = 0
+        if interval >= 10
+          min_interval = 10
+          @call_interval = interval / 10
+        else
+          min_interval = interval
+          @call_interval = 0
+        end
+
+        super(min_interval, true)
+      end
+
+      def on_timer
+        @num_call += 1
+        if @num_call >= @call_interval
+          @num_call = 0
+          @callback.call
+        end
+      rescue => e
+        @log.error e.to_s
+        @log.error_backtrace
+      end
+    end
+
     def start
+      super
+
       log.debug "listening monitoring http server on http://#{@bind}:#{@port}/api/plugins"
       @srv = WEBrick::HTTPServer.new({
-          :BindAddress => @bind,
-          :Port => @port,
-          :Logger => WEBrick::Log.new(STDERR, WEBrick::Log::FATAL),
-          :AccessLog => [],
+          BindAddress: @bind,
+          Port: @port,
+          Logger: WEBrick::Log.new(STDERR, WEBrick::Log::FATAL),
+          AccessLog: [],
         })
       @srv.mount('/api/plugins', LTSVMonitorServlet, self)
       @srv.mount('/api/plugins.json', JSONMonitorServlet, self)
@@ -214,6 +251,29 @@ module Fluent
       @thread = Thread.new {
         @srv.start
       }
+      if @tag
+        log.debug "tag parameter is specified. Emit plugins info to '#{@tag}'"
+
+        @loop = Coolio::Loop.new
+        opts = {with_config: false}
+        timer = TimerWatcher.new(@emit_interval, log) {
+          es = MultiEventStream.new
+          now = Engine.now
+          plugins_info_all(opts).each { |record|
+            es.add(now, record)
+          }
+          router.emit_stream(@tag, es)
+        }
+        @loop.attach(timer)
+        @thread_for_emit = Thread.new(&method(:run))
+      end
+    end
+
+    def run
+      @loop.run
+    rescue => e
+      log.error "unexpected error", error: e.to_s
+      log.error_backtrace
     end
 
     def shutdown
@@ -225,6 +285,15 @@ module Fluent
         @thread.join
         @thread = nil
       end
+      if @tag
+        @loop.watchers.each { |w| w.detach }
+        @loop.stop
+        @loop = nil
+        @thread_for_emit.join
+        @thread_for_emit = nil
+      end
+
+      super
     end
 
     MONITOR_INFO = {
@@ -299,7 +368,7 @@ module Fluent
     # multiple plugins could have the same type
     def plugins_info_by_type(type, opts={})
       array = all_plugins.select {|pe|
-        (pe.config['@type'] == type || pe.config['type'] == type) rescue nil
+        (pe.config['@type'] == type) rescue nil
       }
       array.map {|pe|
         get_monitor_info(pe, opts)
@@ -312,6 +381,9 @@ module Fluent
       }
     end
 
+    # TODO: use %i() after drop ruby v1.9.3 support.
+    IGNORE_ATTRIBUTES = %W(@config_root_section @config @masked_config).map(&:to_sym)
+
     # get monitor info from the plugin `pe` and return a hash object
     def get_monitor_info(pe, opts={})
       obj = {}
@@ -319,8 +391,8 @@ module Fluent
       # Common plugin information
       obj['plugin_id'] = pe.plugin_id
       obj['plugin_category'] = plugin_category(pe)
-      obj['type'] = pe.config['@type'] || pe.config['type']
-      obj['config'] = pe.config
+      obj['type'] = pe.config['@type']
+      obj['config'] = pe.config if !opts.has_key?(:with_config) || opts[:with_config]
 
       # run MONITOR_INFO in plugins' instance context and store the info to obj
       MONITOR_INFO.each_pair {|key,code|
@@ -335,6 +407,7 @@ module Fluent
         iv = {}
         pe.instance_eval do
           instance_variables.each {|sym|
+            next if IGNORE_ATTRIBUTES.include?(sym)
             key = sym.to_s[1..-1]  # removes first '@'
             iv[key] = instance_variable_get(sym)
           }

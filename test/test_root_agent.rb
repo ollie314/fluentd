@@ -1,4 +1,6 @@
+require_relative 'helper'
 require 'fluent/event_router'
+require 'fluent/system_config'
 require_relative 'test_plugin_classes'
 
 class RootAgentTest < ::Test::Unit::TestCase
@@ -6,18 +8,18 @@ class RootAgentTest < ::Test::Unit::TestCase
   include FluentTest
 
   def test_initialize
-    ra = RootAgent.new
+    ra = RootAgent.new(log: $log)
     assert_equal 0, ra.instance_variable_get(:@suppress_emit_error_log_interval)
     assert_nil ra.instance_variable_get(:@next_emit_error_log_time)
   end
 
   data(
-    'suppress interval' => [{:suppress_interval => 30}, {:@suppress_emit_error_log_interval => 30}],
-    'without source' => [{:without_source => true}, {:@without_source => true}]
+    'suppress interval' => [{'emit_error_log_interval' => 30}, {:@suppress_emit_error_log_interval => 30}],
+    'without source' => [{'without_source' => true}, {:@without_source => true}]
     )
   def test_initialize_with_opt(data)
     opt, expected = data
-    ra = RootAgent.new(opt)
+    ra = RootAgent.new(log: $log, system_config: SystemConfig.new(opt))
     expected.each { |k, v|
       assert_equal v, ra.instance_variable_get(k)
     }
@@ -25,7 +27,7 @@ class RootAgentTest < ::Test::Unit::TestCase
 
   sub_test_case 'configure' do
     setup do
-      @ra = RootAgent.new
+      @ra = RootAgent.new(log: $log)
       stub(Engine).root_agent { @ra }
     end
 
@@ -41,9 +43,6 @@ class RootAgentTest < ::Test::Unit::TestCase
       assert_empty ra.labels
       assert_empty ra.outputs
       assert_empty ra.filters
-      [:@started_inputs, :@started_outputs, :@started_filters].each { |k|
-        assert_empty ra.instance_variable_get(k)
-      }
       assert_nil ra.context
       assert_nil ra.error_collector
     end
@@ -80,9 +79,6 @@ EOC
       assert_kind_of FluentTestInput, ra.inputs.first
       assert_kind_of RelabelOutput, ra.outputs.first
       assert_kind_of FluentTestFilter, ra.filters.first
-      [:@started_inputs, :@started_outputs, :@started_filters].each { |k|
-        assert_empty ra.instance_variable_get(k)
-      }
       assert ra.error_collector
 
       %W(@test @ERROR).each { |label_symbol|
@@ -102,7 +98,7 @@ EOC
 
   sub_test_case 'start/shutdown' do
     setup do
-      @ra = RootAgent.new
+      @ra = RootAgent.new(log: $log)
       @ra.configure(Config.parse(<<-EOC, "(test)", "(test_dir)", true))
 <source>
   @type test_in

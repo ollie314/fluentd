@@ -14,11 +14,23 @@
 #    limitations under the License.
 #
 
-module Fluent
-  require 'fluent/event_router'
-  require 'fluent/root_agent'
+require 'socket'
 
+require 'cool.io'
+
+require 'fluent/config'
+require 'fluent/event'
+require 'fluent/event_router'
+require 'fluent/msgpack_factory'
+require 'fluent/root_agent'
+require 'fluent/time'
+require 'fluent/system_config'
+require 'fluent/plugin'
+
+module Fluent
   class EngineClass
+    include Fluent::MessagePackFactory::Mixin
+
     def initialize
       @root_agent = nil
       @event_router = nil
@@ -30,27 +42,31 @@ module Fluent
       @log_event_queue = []
 
       @suppress_config_dump = false
+
+      @system_config = SystemConfig.new
     end
+
+    MAINLOOP_SLEEP_INTERVAL = 0.3
 
     MATCH_CACHE_SIZE = 1024
     LOG_EMIT_INTERVAL = 0.1
 
     attr_reader :root_agent
     attr_reader :matches, :sources
+    attr_reader :system_config
 
-    def init(opts = {})
+    def init(system_config)
+      @system_config = system_config
+
       BasicSocket.do_not_reverse_lookup = true
-      Plugin.load_plugins
-      if defined?(Encoding)
-        Encoding.default_internal = 'ASCII-8BIT' if Encoding.respond_to?(:default_internal)
-        Encoding.default_external = 'ASCII-8BIT' if Encoding.respond_to?(:default_external)
-      end
 
-      suppress_interval(opts[:suppress_interval]) if opts[:suppress_interval]
-      @suppress_config_dump = opts[:suppress_config_dump] if opts[:suppress_config_dump]
-      @without_source = opts[:without_source] if opts[:without_source]
+      suppress_interval(system_config.emit_error_log_interval) unless system_config.emit_error_log_interval.nil?
+      @suppress_config_dump = system_config.suppress_config_dump unless system_config.suppress_config_dump.nil?
+      @without_source = system_config.without_source unless system_config.without_source.nil?
 
-      @root_agent = RootAgent.new(opts)
+      @root_agent = RootAgent.new(log: log, system_config: @system_config)
+
+      MessagePackFactory.init
 
       self
     end
@@ -76,6 +92,16 @@ module Fluent
     def run_configure(conf)
       configure(conf)
       conf.check_not_fetched { |key, e|
+        parent_name, plugin_name = e.unused_in
+        if parent_name
+          message = if plugin_name
+                      "section <#{e.name}> is not used in <#{parent_name}> of #{plugin_name} plugin"
+                    else
+                      "section <#{e.name}> is not used in <#{parent_name}>"
+                    end
+          $log.warn message
+          next
+        end
         unless e.name == 'system'
           unless @without_source && e.name == 'source'
             $log.warn "parameter '#{key}' in #{e.to_s.strip} is not used."
@@ -90,30 +116,28 @@ module Fluent
         $log.info "gem '#{spec.name}' version '#{spec.version}'"
       end
 
+      @root_agent.configure(conf)
+      @event_router = @root_agent.event_router
+
       unless @suppress_config_dump
         $log.info "using configuration file: #{conf.to_s.rstrip}"
       end
-
-      @root_agent.configure(conf)
-      @event_router = @root_agent.event_router
     end
 
-    def load_plugin_dir(dir)
-      Plugin.load_plugin_dir(dir)
+    def add_plugin_dir(dir)
+      Plugin.add_plugin_dir(dir)
     end
 
     def emit(tag, time, record)
-      unless record.nil?
-        emit_stream tag, OneEventStream.new(time, record)
-      end
+      raise "BUG: use router.emit instead of Engine.emit"
     end
 
     def emit_array(tag, array)
-      emit_stream tag, ArrayEventStream.new(array)
+      raise "BUG: use router.emit_array instead of Engine.emit_array"
     end
 
     def emit_stream(tag, es)
-      @event_router.emit_stream(tag, es)
+      raise "BUG: use router.emit_stream instead of Engine.emit_stream"
     end
 
     def flush!
@@ -122,7 +146,7 @@ module Fluent
 
     def now
       # TODO thread update
-      Time.now.to_i
+      Fluent::EventTime.now
     end
 
     def log_event_loop
@@ -140,7 +164,7 @@ module Fluent
           begin
             @event_router.emit(tag, time, record)
           rescue => e
-            $log.error "failed to emit fluentd's log event", :tag => tag, :event => record, :error_class => e.class, :error => e
+            $log.error "failed to emit fluentd's log event", tag: tag, event: record, error: e
           end
         }
       end
@@ -155,38 +179,24 @@ module Fluent
           @log_emit_thread = Thread.new(&method(:log_event_loop))
         end
 
-        unless @engine_stopped
-          # for empty loop
-          @default_loop = Coolio::Loop.default
-          @default_loop.attach Coolio::TimerWatcher.new(1, true)
-          # TODO attach async watch for thread pool
-          @default_loop.run
-        end
+        sleep MAINLOOP_SLEEP_INTERVAL until @engine_stopped
 
-        if @engine_stopped and @default_loop
-          @default_loop.stop
-          @default_loop = nil
-        end
-
-      rescue => e
-        $log.error "unexpected error", :error_class=>e.class, :error=>e
+      rescue Exception => e
+        $log.error "unexpected error", error: e
         $log.error_backtrace
-      ensure
-        $log.info "shutting down fluentd"
-        shutdown
-        if @log_emit_thread
-          @log_event_loop_stop = true
-          @log_emit_thread.join
-        end
+        raise
+      end
+
+      $log.info "shutting down fluentd"
+      shutdown
+      if @log_emit_thread
+        @log_event_loop_stop = true
+        @log_emit_thread.join
       end
     end
 
     def stop
       @engine_stopped = true
-      if @default_loop
-        @default_loop.stop
-        @default_loop = nil
-      end
       nil
     end
 

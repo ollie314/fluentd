@@ -16,21 +16,31 @@
 
 require 'json'
 
-module Fluent
-  require 'fluent/config/error'
+require 'fluent/config/error'
+require 'fluent/config/v1_parser'
 
+module Fluent
   module Config
     class Section < BasicObject
       def self.name
         'Fluent::Config::Section'
       end
 
-      def initialize(params = {})
+      def initialize(params = {}, config_element = nil)
         @klass = 'Fluent::Config::Section'
         @params = params
+        @corresponding_config_element = config_element
       end
 
       alias :object_id :__id__
+
+      def corresponding_config_element
+        @corresponding_config_element
+      end
+
+      def to_s
+        inspect
+      end
 
       def inspect
         "<Fluent::Config::Section #{@params.to_json}>"
@@ -61,6 +71,19 @@ module Fluent
         @params[key.to_sym]
       end
 
+      def respond_to?(symbol, include_all=false)
+        case symbol
+        when :inspect, :nil?, :to_h, :+, :instance_of?, :kind_of?, :[], :respond_to?, :respond_to_missing?
+          true
+        when :!, :!= , :==, :equal?, :instance_eval, :instance_exec
+          true
+        when :method_missing, :singleton_method_added, :singleton_method_removed, :singleton_method_undefined
+          include_all
+        else
+          false
+        end
+      end
+
       def respond_to_missing?(symbol, include_private)
         @params.has_key?(symbol)
       end
@@ -69,13 +92,13 @@ module Fluent
         if @params.has_key?(name)
           @params[name]
         else
-          super
+          ::Kernel.raise ::NoMethodError, "undefined method `#{name}' for #{self.inspect}"
         end
       end
     end
 
     module SectionGenerator
-      def self.generate(proxy, conf, logger, stack = [])
+      def self.generate(proxy, conf, logger, plugin_class, stack = [])
         return nil if conf.nil?
 
         section_stack = ""
@@ -87,7 +110,7 @@ module Fluent
 
         proxy.defaults.each_pair do |name, defval|
           varname = name.to_sym
-          section_params[varname] = defval
+          section_params[varname] = (defval.dup rescue defval)
         end
 
         if proxy.argument
@@ -96,7 +119,7 @@ module Fluent
             section_params[key] = self.instance_exec(conf.arg, opts, name, &block)
           end
           unless section_params.has_key?(proxy.argument.first)
-            logger.error "config error in:\n#{conf}"
+            logger.error "config error in:\n#{conf}" if logger # logger should exist, but somethimes it's nil (e.g, in tests)
             raise ConfigError, "'<#{proxy.name} ARG>' section requires argument" + section_stack
           end
         end
@@ -113,31 +136,57 @@ module Fluent
             section_params[varname] = self.instance_exec(val, opts, name, &block)
           end
           unless section_params.has_key?(varname)
-            logger.error "config error in:\n#{conf}"
+            logger.error "config error in:\n#{conf}" if logger
             raise ConfigError, "'#{name}' parameter is required" + section_stack
           end
         end
 
+        check_unused_section(proxy, conf, plugin_class)
+
         proxy.sections.each do |name, subproxy|
-          varname = subproxy.param_name.to_sym
+          varname = subproxy.variable_name
           elements = (conf.respond_to?(:elements) ? conf.elements : []).select{ |e| e.name == subproxy.name.to_s || e.name == subproxy.alias.to_s }
+          if elements.empty? && subproxy.init? && !subproxy.multi?
+            elements << Fluent::Config::Element.new(subproxy.name.to_s, '', {}, [])
+          end
+
+          # set subproxy for secret option
+          elements.each { |element|
+            element.corresponding_proxies << subproxy
+          }
 
           if subproxy.required? && elements.size < 1
-            logger.error "config error in:\n#{conf}"
+            logger.error "config error in:\n#{conf}" if logger
             raise ConfigError, "'<#{subproxy.name}>' sections are required" + section_stack
           end
           if subproxy.multi?
-            section_params[varname] = elements.map{ |e| generate(subproxy, e, logger, stack + [subproxy.name]) }
+            section_params[varname] = elements.map{ |e| generate(subproxy, e, logger, plugin_class, stack + [subproxy.name]) }
           else
             if elements.size > 1
-              logger.error "config error in:\n#{conf}"
+              logger.error "config error in:\n#{conf}" if logger
               raise ConfigError, "'<#{subproxy.name}>' section cannot be written twice or more" + section_stack
             end
-            section_params[varname] = generate(subproxy, elements.first, logger, stack + [subproxy.name])
+            section_params[varname] = generate(subproxy, elements.first, logger, plugin_class, stack + [subproxy.name])
           end
         end
 
-        Section.new(section_params)
+        Section.new(section_params, conf)
+      end
+
+      def self.check_unused_section(proxy, conf, plugin_class)
+        elems = conf.respond_to?(:elements) ? conf.elements : []
+        elems.each { |e|
+          next if plugin_class.nil? && Fluent::Config::V1Parser::ELEM_SYMBOLS.include?(e.name) # skip pre-defined non-plugin elements because it doens't have proxy section
+
+          unless proxy.sections.any? { |name, subproxy| e.name == subproxy.name.to_s || e.name == subproxy.alias.to_s }
+            parent_name = if conf.arg.empty?
+                            conf.name
+                          else
+                            "#{conf.name} #{conf.arg}"
+                          end
+            e.unused_in = [parent_name, plugin_class]
+          end
+        }
       end
     end
   end

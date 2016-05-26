@@ -5,11 +5,15 @@ require 'fluent/parser'
 module ParserTest
   include Fluent
 
+  def setup
+    Fluent::Test.setup
+  end
+
   def str2time(str_time, format = nil)
     if format
-      Time.strptime(str_time, format).to_i
+      Fluent::EventTime.from_time(Time.strptime(str_time, format))
     else
-      Time.parse(str_time).to_i
+      Fluent::EventTime.parse(str_time)
     end
   end
 
@@ -39,11 +43,38 @@ module ParserTest
     end
   end
 
+  class BaseParserTestWithTestDriver < ::Test::Unit::TestCase
+    include ParserTest
+
+    def create_driver(conf={})
+      Fluent::Test::ParserTestDriver.new(Fluent::Parser).configure(conf)
+    end
+
+    def test_init
+      d = create_driver
+      assert_true d.instance.estimate_current_event
+    end
+
+    def test_configure_against_string_literal
+      d = create_driver('keep_time_key true')
+      assert_true d.instance.keep_time_key
+    end
+
+    def test_parse
+      d = create_driver
+      assert_raise NotImplementedError do
+        d.parse('')
+      end
+    end
+  end
+
   class TimeParserTest < ::Test::Unit::TestCase
     include ParserTest
 
     def test_call_with_parse
       parser = TextParser::TimeParser.new(nil)
+
+      assert(parser.parse('2013-09-18 12:00:00 +0900').is_a?(Fluent::EventTime))
 
       time = str2time('2013-09-18 12:00:00 +0900')
       assert_equal(time, parser.parse('2013-09-18 12:00:00 +0900'))
@@ -52,14 +83,25 @@ module ParserTest
     def test_parse_with_strptime
       parser = TextParser::TimeParser.new('%d/%b/%Y:%H:%M:%S %z')
 
+      assert(parser.parse('28/Feb/2013:12:00:00 +0900').is_a?(Fluent::EventTime))
+
       time = str2time('28/Feb/2013:12:00:00 +0900', '%d/%b/%Y:%H:%M:%S %z')
       assert_equal(time, parser.parse('28/Feb/2013:12:00:00 +0900'))
+    end
+
+    def test_parse_nsec_with_strptime
+      parser = TextParser::TimeParser.new('%d/%b/%Y:%H:%M:%S:%N %z')
+
+      assert(parser.parse('28/Feb/2013:12:00:00:123456789 +0900').is_a?(Fluent::EventTime))
+
+      time = str2time('28/Feb/2013:12:00:00:123456789 +0900', '%d/%b/%Y:%H:%M:%S:%N %z')
+      assert_equal_event_time(time, parser.parse('28/Feb/2013:12:00:00:123456789 +0900'))
     end
 
     def test_parse_with_invalid_argument
       parser = TextParser::TimeParser.new(nil)
 
-      [[], {}, nil, true, 10000].each { |v|
+      [[], {}, nil, true, 10000, //, ->{}, '', :symbol].each { |v|
         assert_raise Fluent::ParserError do
           parser.parse(v)
         end
@@ -72,7 +114,7 @@ module ParserTest
 
     def internal_test_case(parser)
       text = '192.168.0.1 - - [28/Feb/2013:12:00:00 +0900] [14/Feb/2013:12:00:00 +0900] "true /,/user HTTP/1.1" 200 777'
-      [parser.parse(text), parser.parse(text) { |time, record| return time, record}].each { |time, record|
+      parser.parse(text) { |time, record|
         assert_equal(str2time('28/Feb/2013:12:00:00 +0900', '%d/%b/%Y:%H:%M:%S %z'), time)
         assert_equal({
           'user' => '-',
@@ -94,15 +136,27 @@ module ParserTest
     def test_parse_with_configure
       # Specify conf by configure method instaed of intializer
       regexp = Regexp.new(%q!^(?<host>[^ ]*) [^ ]* (?<user>[^ ]*) \[(?<time>[^\]]*)\] \[(?<date>[^\]]*)\] "(?<flag>\S+)(?: +(?<path>[^ ]*) +\S*)?" (?<code>[^ ]*) (?<size>[^ ]*)$!)
-      parser = TextParser::RegexpParser.new(regexp)
+      parser = Fluent::Test::ParserTestDriver.new(TextParser::RegexpParser, regexp)
       parser.configure('time_format'=>"%d/%b/%Y:%H:%M:%S %z", 'types'=>'user:string,date:time:%d/%b/%Y:%H:%M:%S %z,flag:bool,path:array,code:float,size:integer')
       internal_test_case(parser)
-      assert_equal(regexp, parser.patterns['format'])
-      assert_equal("%d/%b/%Y:%H:%M:%S %z", parser.patterns['time_format'])
+      assert_equal(regexp, parser.instance.patterns['format'])
+      assert_equal("%d/%b/%Y:%H:%M:%S %z", parser.instance.patterns['time_format'])
     end
 
     def test_parse_with_typed_and_name_separator
-      internal_test_case(TextParser::RegexpParser.new(Regexp.new(%q!^(?<host>[^ ]*) [^ ]* (?<user>[^ ]*) \[(?<time>[^\]]*)\] \[(?<date>[^\]]*)\] "(?<flag>\S+)(?: +(?<path>[^ ]*) +\S*)?" (?<code>[^ ]*) (?<size>[^ ]*)$!), 'time_format'=>"%d/%b/%Y:%H:%M:%S %z", 'types'=>'user|string,date|time|%d/%b/%Y:%H:%M:%S %z,flag|bool,path|array,code|float,size|integer', 'types_label_delimiter'=>'|'))
+      internal_test_case(Fluent::Test::ParserTestDriver.new(TextParser::RegexpParser, Regexp.new(%q!^(?<host>[^ ]*) [^ ]* (?<user>[^ ]*) \[(?<time>[^\]]*)\] \[(?<date>[^\]]*)\] "(?<flag>\S+)(?: +(?<path>[^ ]*) +\S*)?" (?<code>[^ ]*) (?<size>[^ ]*)$!), 'time_format'=>"%d/%b/%Y:%H:%M:%S %z", 'types'=>'user|string,date|time|%d/%b/%Y:%H:%M:%S %z,flag|bool,path|array,code|float,size|integer', 'types_label_delimiter'=>'|'))
+    end
+
+    def test_parse_with_time_key
+      parser = Fluent::Test::ParserTestDriver.new(TextParser::RegexpParser, /(?<logtime>[^\]]*)/)
+      parser.configure(
+        'time_format'=>"%Y-%m-%d %H:%M:%S %z",
+        'time_key'=>'logtime',
+      )
+      text = '2013-02-28 12:00:00 +0900'
+      parser.parse(text) do |time, record|
+        assert_equal Fluent::EventTime.parse(text), time
+      end
     end
 
     def test_parse_without_time
@@ -110,20 +164,20 @@ module ParserTest
       text = "tagomori_satoshi tagomoris 34\n"
 
       parser = TextParser::RegexpParser.new(Regexp.new(%q!^(?<name>[^ ]*) (?<user>[^ ]*) (?<age>\d*)$!))
-      parser.configure('types'=>'name:string,user:string,age:bool')
+      parser.configure('types'=>'name:string,user:string,age:integer')
 
-      [parser.parse(text), parser.parse(text) { |time, record| return time, record}].each { |time, record|
+      parser.parse(text) { |time, record|
         assert time && time >= time_at_start, "parser puts current time without time input"
         assert_equal "tagomori_satoshi", record["name"]
         assert_equal "tagomoris", record["user"]
         assert_equal 34, record["age"]
       }
 
-      parser2 = TextParser::RegexpParser.new(Regexp.new(%q!^(?<name>[^ ]*) (?<user>[^ ]*) (?<age>\d*)$!))
-      parser2.configure('types'=>'name:string,user:string,age:bool')
-      parser2.time_default_current = false
+      parser2 = Fluent::Test::ParserTestDriver.new(TextParser::RegexpParser, Regexp.new(%q!^(?<name>[^ ]*) (?<user>[^ ]*) (?<age>\d*)$!))
+      parser2.configure('types'=>'name:string,user:string,age:integer')
+      parser2.instance.estimate_current_event = false
 
-      [parser2.parse(text), parser2.parse(text) { |time, record| return time, record}].each { |time, record|
+      parser2.parse(text) { |time, record|
         assert_equal "tagomori_satoshi", record["name"]
         assert_equal "tagomoris", record["user"]
         assert_equal 34, record["age"]
@@ -133,7 +187,7 @@ module ParserTest
     end
 
     def test_parse_with_keep_time_key
-      parser = TextParser::RegexpParser.new(
+      parser = Fluent::Test::ParserTestDriver.new(TextParser::RegexpParser,
         Regexp.new(%q!(?<time>.*)!),
         'time_format'=>"%d/%b/%Y:%H:%M:%S %z",
         'keep_time_key'=>'true',
@@ -145,7 +199,7 @@ module ParserTest
     end
 
     def test_parse_with_keep_time_key_with_typecast
-      parser = TextParser::RegexpParser.new(
+      parser = Fluent::Test::ParserTestDriver.new(TextParser::RegexpParser,
         Regexp.new(%q!(?<time>.*)!),
         'time_format'=>"%d/%b/%Y:%H:%M:%S %z",
         'keep_time_key'=>'true',
@@ -162,7 +216,7 @@ module ParserTest
     include ParserTest
 
     def setup
-      @parser = TextParser::TEMPLATE_REGISTRY.lookup('apache').call
+      @parser = Fluent::Plugin.new_parser('apache')
     end
 
     data('parse' => :parse, 'call' => :call)
@@ -198,7 +252,8 @@ module ParserTest
     include ParserTest
 
     def setup
-      @parser = TextParser::TEMPLATE_REGISTRY.lookup('apache_error').call
+      @parser = Fluent::Plugin.new_parser('apache_error')
+      @parser.configure({})
       @expected = {
         'level' => 'error',
         'client' => '127.0.0.1',
@@ -269,7 +324,7 @@ module ParserTest
     include ParserTest
 
     def setup
-      @parser = TextParser::TEMPLATE_REGISTRY.lookup('syslog').call
+      @parser = Fluent::Test::ParserTestDriver.new('syslog')
       @expected = {
         'host'    => '192.168.0.1',
         'ident'   => 'fluentd',
@@ -284,8 +339,8 @@ module ParserTest
         assert_equal(str2time('Feb 28 12:00:00', '%b %d %H:%M:%S'), time)
         assert_equal(@expected, record)
       }
-      assert_equal(TextParser::SyslogParser::REGEXP, @parser.patterns['format'])
-      assert_equal("%b %d %H:%M:%S", @parser.patterns['time_format'])
+      assert_equal(TextParser::SyslogParser::REGEXP, @parser.instance.patterns['format'])
+      assert_equal("%b %d %H:%M:%S", @parser.instance.patterns['time_format'])
     end
 
     def test_parse_with_time_format
@@ -294,7 +349,7 @@ module ParserTest
         assert_equal(str2time('Feb 28 12:00:00', '%b %d %H:%M:%S'), time)
         assert_equal(@expected, record)
       }
-      assert_equal('%b %d %M:%S:%H', @parser.patterns['time_format'])
+      assert_equal('%b %d %M:%S:%H', @parser.instance.patterns['time_format'])
     end
 
     def test_parse_with_priority
@@ -303,8 +358,8 @@ module ParserTest
         assert_equal(str2time('Feb 28 12:00:00', '%b %d %H:%M:%S'), time)
         assert_equal(@expected.merge('pri' => 6), record)
       }
-      assert_equal(TextParser::SyslogParser::REGEXP_WITH_PRI, @parser.patterns['format'])
-      assert_equal("%b %d %H:%M:%S", @parser.patterns['time_format'])
+      assert_equal(TextParser::SyslogParser::REGEXP_WITH_PRI, @parser.instance.patterns['format'])
+      assert_equal("%b %d %H:%M:%S", @parser.instance.patterns['time_format'])
     end
 
     def test_parse_without_colon
@@ -313,8 +368,8 @@ module ParserTest
         assert_equal(str2time('Feb 28 12:00:00', '%b %d %H:%M:%S'), time)
         assert_equal(@expected, record)
       }
-      assert_equal(TextParser::SyslogParser::REGEXP, @parser.patterns['format'])
-      assert_equal("%b %d %H:%M:%S", @parser.patterns['time_format'])
+      assert_equal(TextParser::SyslogParser::REGEXP, @parser.instance.patterns['format'])
+      assert_equal("%b %d %H:%M:%S", @parser.instance.patterns['time_format'])
     end
 
     def test_parse_with_keep_time_key
@@ -336,7 +391,9 @@ module ParserTest
       @parser = TextParser::JSONParser.new
     end
 
-    def test_parse
+    data('oj' => 'oj', 'yajl' => 'yajl')
+    def test_parse(data)
+      @parser.configure('json_parser' => data)
       @parser.parse('{"time":1362020400,"host":"192.168.0.1","size":777,"method":"PUT"}') { |time, record|
         assert_equal(str2time('2013-02-28 12:00:00 +0900').to_i, time)
         assert_equal({
@@ -347,9 +404,19 @@ module ParserTest
       }
     end
 
-    def test_parse_without_time
+    data('oj' => 'oj', 'yajl' => 'yajl')
+    def test_parse_with_large_float(data)
+      @parser.configure('json_parser' => data)
+      @parser.parse('{"num":999999999999999999999999999999.99999}') { |time, record|
+        assert_equal(Float, record['num'].class)
+      }
+    end
+
+    data('oj' => 'oj', 'yajl' => 'yajl')
+    def test_parse_without_time(data)
       time_at_start = Time.now.to_i
 
+      @parser.configure('json_parser' => data)
       @parser.parse('{"host":"192.168.0.1","size":777,"method":"PUT"}') { |time, record|
         assert time && time >= time_at_start, "parser puts current time without time input"
         assert_equal({
@@ -361,7 +428,7 @@ module ParserTest
 
       parser = TextParser::JSONParser.new
       parser.estimate_current_event = false
-      parser.configure({})
+      parser.configure('json_parser' => data)
       parser.parse('{"host":"192.168.0.1","size":777,"method":"PUT"}') { |time, record|
         assert_equal({
           'host'   => '192.168.0.1',
@@ -372,20 +439,51 @@ module ParserTest
       }
     end
 
-    def test_parse_with_invalid_time
+    data('oj' => 'oj', 'yajl' => 'yajl')
+    def test_parse_with_invalid_time(data)
+      @parser.configure('json_parser' => data)
       assert_raise Fluent::ParserError do
         @parser.parse('{"time":[],"k":"v"}') { |time, record| }
       end
     end
 
-    def test_parse_with_keep_time_key
+    data('oj' => 'oj', 'yajl' => 'yajl')
+    def test_parse_float_time(data)
       parser = TextParser::JSONParser.new
+      parser.configure('json_parser' => data)
+      text = "100.1"
+      parser.parse("{\"time\":\"#{text}\"}") do |time, record|
+        assert_equal Time.at(text.to_f).to_i, time.sec
+        assert_equal Time.at(text.to_f).nsec, time.nsec
+      end
+    end
+
+    data('oj' => 'oj', 'yajl' => 'yajl')
+    def test_parse_with_keep_time_key(data)
+      parser = TextParser::JSONParser.new
+      format = "%d/%b/%Y:%H:%M:%S %z"
       parser.configure(
-        'time_format'=>"%d/%b/%Y:%H:%M:%S %z",
-        'keep_time_key'=>'true',
+        'time_format' => format,
+        'keep_time_key' => 'true',
+        'json_parser' => data
       )
       text = "28/Feb/2013:12:00:00 +0900"
       parser.parse("{\"time\":\"#{text}\"}") do |time, record|
+        assert_equal Time.strptime(text, format).to_i, time.sec
+        assert_equal text, record['time']
+      end
+    end
+
+    data('oj' => 'oj', 'yajl' => 'yajl')
+    def test_parse_with_keep_time_key_without_time_format(data)
+      parser = TextParser::JSONParser.new
+      parser.configure(
+        'keep_time_key' => 'true',
+        'json_parser' => data
+      )
+      text = "100"
+      parser.parse("{\"time\":\"#{text}\"}") do |time, record|
+        assert_equal text.to_i, time.sec
         assert_equal text, record['time']
       end
     end
@@ -395,7 +493,7 @@ module ParserTest
     include ParserTest
 
     def setup
-      @parser = TextParser::TEMPLATE_REGISTRY.lookup('nginx').call
+      @parser = Fluent::Plugin.new_parser('nginx')
       @expected = {
         'remote'  => '127.0.0.1',
         'host'    => '192.168.0.1',
@@ -517,6 +615,38 @@ module ParserTest
         assert_equal text, record['time']
       end
     end
+
+    data('array param' => '["a","b","c","d","e","f"]', 'string param' => 'a,b,c,d,e,f')
+    def test_parse_with_null_value_pattern
+      parser = TextParser::TSVParser.new
+      parser.configure(
+        'keys'=>param,
+        'time_key'=>'time',
+        'null_value_pattern'=>'^(-|null|NULL)$'
+      )
+      parser.parse("-\tnull\tNULL\t\t--\tnuLL") do |time, record|
+        assert_nil record['a']
+        assert_nil record['b']
+        assert_nil record['c']
+        assert_equal record['d'], ''
+        assert_equal record['e'], '--'
+        assert_equal record['f'], 'nuLL'
+      end
+    end
+
+    data('array param' => '["a","b"]', 'string param' => 'a,b')
+    def test_parse_with_null_empty_string
+      parser = TextParser::TSVParser.new
+      parser.configure(
+        'keys'=>param,
+        'time_key'=>'time',
+        'null_empty_string'=>true
+      )
+      parser.parse("\t ") do |time, record|
+        assert_nil record['a']
+        assert_equal record['b'], ' '
+      end
+    end
   end
 
   class CSVParserTest < ::Test::Unit::TestCase
@@ -572,6 +702,38 @@ module ParserTest
       text = '28/Feb/2013:12:00:00 +0900'
       parser.parse(text) do |time, record|
         assert_equal text, record['time']
+      end
+    end
+
+    data('array param' => '["a","b","c","d","e","f"]', 'string param' => 'a,b,c,d,e,f')
+    def test_parse_with_null_value_pattern
+      parser = TextParser::CSVParser.new
+      parser.configure(
+        'keys'=>param,
+        'time_key'=>'time',
+        'null_value_pattern'=>'^(-|null|NULL)$'
+      )
+      parser.parse("-,null,NULL,,--,nuLL") do |time, record|
+        assert_nil record['a']
+        assert_nil record['b']
+        assert_nil record['c']
+        assert_equal record['d'], ''
+        assert_equal record['e'], '--'
+        assert_equal record['f'], 'nuLL'
+      end
+    end
+
+    data('array param' => '["a","b"]', 'string param' => 'a,b')
+    def test_parse_with_null_empty_string
+      parser = TextParser::CSVParser.new
+      parser.configure(
+        'keys'=>param,
+        'time_key'=>'time',
+        'null_empty_string'=>true
+      )
+      parser.parse(", ") do |time, record|
+        assert_nil record['a']
+        assert_equal record['b'], ' '
       end
     end
   end
@@ -672,6 +834,32 @@ module ParserTest
         assert_equal text, record['time']
       end
     end
+
+    def test_parse_with_null_value_pattern
+      parser = TextParser::LabeledTSVParser.new
+      parser.configure(
+        'null_value_pattern'=>'^(-|null|NULL)$'
+      )
+      parser.parse("a:-\tb:null\tc:NULL\td:\te:--\tf:nuLL") do |time, record|
+        assert_nil record['a']
+        assert_nil record['b']
+        assert_nil record['c']
+        assert_equal record['d'], ''
+        assert_equal record['e'], '--'
+        assert_equal record['f'], 'nuLL'
+      end
+    end
+
+    def test_parse_with_null_empty_string
+      parser = TextParser::LabeledTSVParser.new
+      parser.configure(
+        'null_empty_string'=>true
+      )
+      parser.parse("a:\tb: ") do |time, record|
+        assert_nil record['a']
+        assert_equal record['b'], ' '
+      end
+    end
   end
 
   class NoneParserTest < ::Test::Unit::TestCase
@@ -687,7 +875,7 @@ module ParserTest
     end
 
     def test_parse
-      parser = TextParser::TEMPLATE_REGISTRY.lookup('none').call
+      parser = Fluent::Plugin.new_parser('none')
       parser.configure({})
       parser.parse('log message!') { |time, record|
         assert_equal({'message' => 'log message!'}, record)
@@ -705,14 +893,14 @@ module ParserTest
     def test_parse_without_default_time
       time_at_start = Time.now.to_i
 
-      parser = TextParser::TEMPLATE_REGISTRY.lookup('none').call
+      parser = Fluent::Plugin.new_parser('none')
       parser.configure({})
       parser.parse('log message!') { |time, record|
         assert time && time >= time_at_start, "parser puts current time without time input"
         assert_equal({'message' => 'log message!'}, record)
       }
 
-      parser = TextParser::TEMPLATE_REGISTRY.lookup('none').call
+      parser = Fluent::Plugin.new_parser('none')
       parser.estimate_current_event = false
       parser.configure({})
       parser.parse('log message!') { |time, record|
@@ -726,7 +914,7 @@ module ParserTest
     include ParserTest
 
     def create_parser(conf)
-      parser = TextParser::TEMPLATE_REGISTRY.lookup('multiline').call
+      parser = Fluent::Plugin.new_parser('multiline')
       parser.configure(conf)
       parser
     end
@@ -839,7 +1027,7 @@ EOS
 
     def test_lookup_unknown_format
       assert_raise ConfigError do
-        TextParser::TEMPLATE_REGISTRY.lookup('unknown')
+        Fluent::Plugin.new_parser('unknown')
       end
     end
 
@@ -847,7 +1035,7 @@ EOS
     def test_lookup_known_parser(data)
       $LOAD_PATH.unshift(File.join(File.expand_path(File.dirname(__FILE__)), 'scripts'))
       assert_nothing_raised ConfigError do
-        TextParser::TEMPLATE_REGISTRY.lookup(data)
+        Fluent::Plugin.new_parser(data)
       end
       $LOAD_PATH.shift
     end
@@ -855,7 +1043,7 @@ EOS
     def test_parse_with_return
       parser = TextParser.new
       parser.configure('format' => 'none')
-      time, record = parser.parse('log message!')
+      _time, record = parser.parse('log message!')
       assert_equal({'message' => 'log message!'}, record)
     end
 

@@ -1,5 +1,6 @@
 require_relative '../helper'
 require 'fluent/test'
+require 'fluent/plugin/out_stream'
 
 module StreamOutputTest
   def setup
@@ -17,6 +18,23 @@ module StreamOutputTest
         [time,{"a"=>1}].to_msgpack +
         [time,{"a"=>2}].to_msgpack
       ].to_msgpack
+
+    result = d.run
+    assert_equal(expect, result)
+  end
+
+  def test_write_event_time
+    d = create_driver
+
+    time = Fluent::EventTime.parse("2011-01-02 13:14:15 UTC")
+    d.emit({"a"=>1}, time)
+    d.emit({"a"=>2}, time)
+
+    expect = ["test",
+        Fluent::Engine.msgpack_factory.packer.write([time,{"a"=>1}]).to_s +
+        Fluent::Engine.msgpack_factory.packer.write([time,{"a"=>2}]).to_s
+      ]
+    expect = Fluent::Engine.msgpack_factory.packer.write(expect).to_s
 
     result = d.run
     assert_equal(expect, result)

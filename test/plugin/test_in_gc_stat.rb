@@ -1,5 +1,6 @@
 require_relative '../helper'
 require 'fluent/test'
+require 'fluent/plugin/in_gc_stat'
 
 class GCStatInputTest < Test::Unit::TestCase
   def setup
@@ -33,5 +34,6 @@ class GCStatInputTest < Test::Unit::TestCase
     emits = d.emits
     assert(emits.length > 0)
     assert_equal(stat, emits[0][2])
+    assert(emits[0][1].is_a?(Fluent::EventTime))
   end
 end

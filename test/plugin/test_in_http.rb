@@ -1,8 +1,21 @@
 require_relative '../helper'
 require 'fluent/test'
+require 'fluent/plugin/in_http'
 require 'net/http'
 
 class HttpInputTest < Test::Unit::TestCase
+  class << self
+    def startup
+      socket_manager_path = ServerEngine::SocketManager::Server.generate_path
+      @server = ServerEngine::SocketManager::Server.open(socket_manager_path)
+      ENV['SERVERENGINE_SOCKETMANAGER_PATH'] = socket_manager_path.to_s
+    end
+
+    def shutdown
+      @server.close
+    end
+  end
+
   def setup
     Fluent::Test.setup
   end
@@ -32,15 +45,31 @@ class HttpInputTest < Test::Unit::TestCase
   def test_time
     d = create_driver
 
-    time = Time.parse("2011-01-02 13:14:15 UTC").to_i
+    time = Fluent::EventTime.new(Time.parse("2011-01-02 13:14:15 UTC").to_i)
     Fluent::Engine.now = time
 
     d.expect_emit "tag1", time, {"a"=>1}
     d.expect_emit "tag2", time, {"a"=>2}
 
     d.run do
-      d.expected_emits.each {|tag,time,record|
+      d.expected_emits.each {|tag,_time,record|
         res = post("/#{tag}", {"json"=>record.to_json})
+        assert_equal "200", res.code
+      }
+    end
+  end
+
+  def test_time_as_float
+    d = create_driver
+
+    float_time = Time.parse("2011-01-02 13:14:15.123 UTC").to_f
+    time = Fluent::EventTime.from_time(Time.at(float_time))
+
+    d.expect_emit "tag1", time, {"a"=>1}
+
+    d.run do
+      d.expected_emits.each {|tag,_time,record|
+        res = post("/#{tag}", {"json"=>record.to_json, "time"=>float_time.to_s})
         assert_equal "200", res.code
       }
     end
@@ -49,14 +78,14 @@ class HttpInputTest < Test::Unit::TestCase
   def test_json
     d = create_driver
 
-    time = Time.parse("2011-01-02 13:14:15 UTC").to_i
+    time = Fluent::EventTime.new(Time.parse("2011-01-02 13:14:15 UTC").to_i)
 
     d.expect_emit "tag1", time, {"a"=>1}
     d.expect_emit "tag2", time, {"a"=>2}
 
     d.run do
-      d.expected_emits.each {|tag,time,record|
-        res = post("/#{tag}", {"json"=>record.to_json, "time"=>time.to_s})
+      d.expected_emits.each {|tag,_time,record|
+        res = post("/#{tag}", {"json"=>record.to_json, "time"=>_time.to_s})
         assert_equal "200", res.code
       }
     end
@@ -69,7 +98,7 @@ class HttpInputTest < Test::Unit::TestCase
   def test_multi_json
     d = create_driver
 
-    time = Time.parse("2011-01-02 13:14:15 UTC").to_i
+    time = Fluent::EventTime.new(Time.parse("2011-01-02 13:14:15 UTC").to_i)
 
     events = [{"a"=>1},{"a"=>2}]
     tag = "tag1"
@@ -85,16 +114,66 @@ class HttpInputTest < Test::Unit::TestCase
 
   end
 
-  def test_json_with_add_http_headers
+  def test_json_with_add_remote_addr
+    d = create_driver(CONFIG + "add_remote_addr true")
+    time = Time.parse("2011-01-02 13:14:15 UTC").to_i
+
+    d.expect_emit "tag1", time, {"REMOTE_ADDR"=>"127.0.0.1", "a"=>1}
+    d.expect_emit "tag2", time, {"REMOTE_ADDR"=>"127.0.0.1", "a"=>2}
+
+    d.run do
+      d.expected_emits.each {|tag,_time,record|
+        res = post("/#{tag}", {"json"=>record.to_json, "time"=>_time.to_s})
+        assert_equal "200", res.code
+      }
+    end
+
+  end
+
+  def test_multi_json_with_add_remote_addr
+    d = create_driver(CONFIG + "add_remote_addr true")
+
+    time = Time.parse("2011-01-02 13:14:15 UTC").to_i
+    events = [{"a"=>1},{"a"=>2}]
+    tag = "tag1"
+
+    d.expect_emit "tag1", time, {"REMOTE_ADDR"=>"127.0.0.1", "a"=>1}
+    d.expect_emit "tag1", time, {"REMOTE_ADDR"=>"127.0.0.1", "a"=>2}
+
+    d.run do
+      res = post("/#{tag}", {"json"=>events.to_json, "time"=>time.to_s})
+      assert_equal "200", res.code
+    end
+
+  end
+
+  def test_multi_json_with_add_http_headers
     d = create_driver(CONFIG + "add_http_headers true")
 
     time = Time.parse("2011-01-02 13:14:15 UTC").to_i
+    events = [{"a"=>1},{"a"=>2}]
+    tag = "tag1"
+
+    d.run do
+      res = post("/#{tag}", {"json"=>events.to_json, "time"=>time.to_s})
+      assert_equal "200", res.code
+    end
+
+    d.emit_streams.each { |_tag, es|
+      assert include_http_header?(es.first[1])
+    }
+  end
+
+  def test_json_with_add_http_headers
+    d = create_driver(CONFIG + "add_http_headers true")
+
+    time = Fluent::EventTime.new(Time.parse("2011-01-02 13:14:15 UTC").to_i)
 
     records = [["tag1", time, {"a"=>1}], ["tag2", time, {"a"=>2}]]
 
     d.run do
-      records.each {|tag,time,record|
-        res = post("/#{tag}", {"json"=>record.to_json, "time"=>time.to_s})
+      records.each {|tag,_time,record|
+        res = post("/#{tag}", {"json"=>record.to_json, "time"=>_time.to_s})
         assert_equal "200", res.code
 
       }
@@ -108,14 +187,14 @@ class HttpInputTest < Test::Unit::TestCase
   def test_application_json
     d = create_driver
 
-    time = Time.parse("2011-01-02 13:14:15 UTC").to_i
+    time = Fluent::EventTime.new(Time.parse("2011-01-02 13:14:15 UTC").to_i)
 
     d.expect_emit "tag1", time, {"a"=>1}
     d.expect_emit "tag2", time, {"a"=>2}
 
     d.run do
-      d.expected_emits.each {|tag,time,record|
-        res = post("/#{tag}?time=#{time.to_s}", record.to_json, {"content-type"=>"application/json; charset=utf-8"})
+      d.expected_emits.each {|tag,_time,record|
+        res = post("/#{tag}?time=#{_time.to_s}", record.to_json, {"Content-Type"=>"application/json; charset=utf-8"})
         assert_equal "200", res.code
       }
     end
@@ -124,14 +203,14 @@ class HttpInputTest < Test::Unit::TestCase
   def test_msgpack
     d = create_driver
 
-    time = Time.parse("2011-01-02 13:14:15 UTC").to_i
+    time = Fluent::EventTime.new(Time.parse("2011-01-02 13:14:15 UTC").to_i)
 
     d.expect_emit "tag1", time, {"a"=>1}
     d.expect_emit "tag2", time, {"a"=>2}
 
     d.run do
-      d.expected_emits.each {|tag,time,record|
-        res = post("/#{tag}", {"msgpack"=>record.to_msgpack, "time"=>time.to_s})
+      d.expected_emits.each {|tag,_time,record|
+        res = post("/#{tag}", {"msgpack"=>record.to_msgpack, "time"=>_time.to_s})
         assert_equal "200", res.code
       }
     end
@@ -140,7 +219,7 @@ class HttpInputTest < Test::Unit::TestCase
   def test_multi_msgpack
     d = create_driver
 
-    time = Time.parse("2011-01-02 13:14:15 UTC").to_i
+    time = Fluent::EventTime.new(Time.parse("2011-01-02 13:14:15 UTC").to_i)
 
     events = [{"a"=>1},{"a"=>2}]
     tag = "tag1"
@@ -162,17 +241,17 @@ class HttpInputTest < Test::Unit::TestCase
       types field_1:integer
     ])
 
-    time = Time.parse("2011-01-02 13:14:15 UTC").to_i
+    time = Fluent::EventTime.new(Time.parse("2011-01-02 13:14:15 UTC").to_i)
 
     d.expect_emit "tag1", time, {"field_1" => 1, "field_2" => 'str'}
     d.expect_emit "tag2", time, {"field_1" => 2, "field_2" => 'str'}
 
     d.run do
-      d.expected_emits.each { |tag, time, record|
+      d.expected_emits.each { |tag, _time, record|
         body = record.map { |k, v|
           v.to_s
         }.join(':')
-        res = post("/#{tag}?time=#{time.to_s}", body)
+        res = post("/#{tag}?time=#{_time.to_s}", body, {'Content-Type' => 'application/octet-stream'})
         assert_equal "200", res.code
       }
     end
@@ -186,15 +265,15 @@ class HttpInputTest < Test::Unit::TestCase
       keys foo,bar
     ])
 
-    time = Time.parse("2011-01-02 13:14:15 UTC").to_i
+    time = Fluent::EventTime.new(Time.parse("2011-01-02 13:14:15 UTC").to_i)
 
     d.expect_emit "tag1", time, {"foo" => "1", "bar" => 'st"r'}
     d.expect_emit "tag2", time, {"foo" => "2", "bar" => 'str'}
 
     d.run do
-      d.expected_emits.each { |tag, time, record|
+      d.expected_emits.each { |tag, _time, record|
         body = record.map { |k, v| v }.to_csv
-        res = post("/#{tag}?time=#{time.to_s}", body)
+        res = post("/#{tag}?time=#{_time.to_s}", body, {'Content-Type' => 'text/comma-separated-values'})
         assert_equal "200", res.code
       }
     end
@@ -204,14 +283,14 @@ class HttpInputTest < Test::Unit::TestCase
     d = create_driver(CONFIG + "respond_with_empty_img true")
     assert_equal true, d.instance.respond_with_empty_img
 
-    time = Time.parse("2011-01-02 13:14:15 UTC").to_i
+    time = Fluent::EventTime.new(Time.parse("2011-01-02 13:14:15 UTC").to_i)
 
     d.expect_emit "tag1", time, {"a"=>1}
     d.expect_emit "tag2", time, {"a"=>2}
 
     d.run do
-      d.expected_emits.each {|tag,time,record|
-        res = post("/#{tag}", {"json"=>record.to_json, "time"=>time.to_s})
+      d.expected_emits.each {|tag,_time,record|
+        res = post("/#{tag}", {"json"=>record.to_json, "time"=>_time.to_s})
         assert_equal "200", res.code
         # Ruby returns ASCII-8 encoded string for GIF.
         assert_equal Fluent::HttpInput::EMPTY_GIF_IMAGE, res.body.force_encoding("UTF-8")
@@ -219,68 +298,122 @@ class HttpInputTest < Test::Unit::TestCase
     end
   end
 
+  def test_cors_allowed
+    d = create_driver(CONFIG + "cors_allow_origins [\"http://foo.com\"]")
+    assert_equal ["http://foo.com"], d.instance.cors_allow_origins
+
+    test_in_http_cros_allowed = nil
+    acao = nil
+
+    begin
+      d.run do
+        Net::HTTP.start("127.0.0.1", PORT) do |http|
+          req = Net::HTTP::Post.new("/foo/bar", {"Origin" => "http://foo.com", "Content-Type" => "application/octet-stream"})
+          res = http.request(req)
+
+          acao = res["Access-Control-Allow-Origin"]
+        end
+      end
+      test_in_http_cros_allowed = true
+    rescue
+      test_in_http_cros_allowed = false
+    end
+
+    assert_equal true, test_in_http_cros_allowed
+    assert_equal "http://foo.com", acao
+  end
+
+  def test_cors_disallowed
+    d = create_driver(CONFIG + "cors_allow_origins [\"http://foo.com\"]")
+    assert_equal ["http://foo.com"], d.instance.cors_allow_origins
+
+    test_in_http_cros_disallowed = nil
+    response_code = nil
+
+    begin
+      d.run do
+        Net::HTTP.start("127.0.0.1", PORT) do |http|
+          req = Net::HTTP::Post.new("/foo/bar", {"Origin" => "http://bar.com", "Content-Type" => "application/octet-stream"})
+          res = http.request(req)
+
+          response_code = res.code
+        end
+      end
+      test_in_http_cros_disallowed = true
+    rescue
+      test_in_http_cros_disallowed = false
+    end
+
+    assert_equal true, test_in_http_cros_disallowed
+    assert_equal "403", response_code
+  end
+
+  $test_in_http_connection_object_ids = []
+  $test_in_http_content_types = []
+  $test_in_http_content_types_flag = false
+  module ContentTypeHook
+    def initialize(*args)
+      @io_handler = nil
+      super
+    end
+    def on_headers_complete(headers)
+      super
+      if $test_in_http_content_types_flag
+        $test_in_http_content_types << self.content_type
+      end
+    end
+
+    def on_message_begin
+      super
+      if $test_in_http_content_types_flag
+        $test_in_http_connection_object_ids << @io_handler.object_id
+      end
+    end
+  end
+
+  class Fluent::HttpInput::Handler
+    prepend ContentTypeHook
+  end
+
   def test_if_content_type_is_initialized_properly
     # This test is to check if Fluent::HttpInput::Handler's @content_type is initialized properly.
     # Especially when in Keep-Alive and the second request has no 'Content-Type'.
-    #
-    # Actually, in the current implementation of in_http, we can't test it directly.
-    # So we replace Fluent::HttpInput::Handler temporally with the extended Handler
-    # in order to collect @content_type(s) per request.
-    # Finally, we check those collected @content_type(s).
-
-    # Save the original Handler
-    orig_handler = Fluent::HttpInput::Handler
 
     begin
-      # Create the extended Handler which can store @content_type per request
-      ext_handler = Class.new(Fluent::HttpInput::Handler) do
-        @@content_types = []
-
-        def self.content_types
-          @@content_types
-        end
-
-        def on_message_complete
-          @@content_types << @content_type
-          super
-        end
-      end
-
-      # Replace the original Handler temporally with the extended one
-      Fluent::HttpInput.module_eval do
-        remove_const(:Handler) if const_defined?(:Handler)
-        const_set(:Handler, ext_handler)
-      end
-
       d = create_driver
 
+      $test_in_http_content_types_flag = true
       d.run do
         # Send two requests the second one has no Content-Type in Keep-Alive
         Net::HTTP.start("127.0.0.1", PORT) do |http|
-          req = Net::HTTP::Post.new("/foodb/bartbl", {"connection" => "keepalive", "content-type" => "application/json"})
+          req = Net::HTTP::Post.new("/foodb/bartbl", {"connection" => "keepalive", "Content-Type" => "application/json"})
           res = http.request(req)
 
           req = Net::HTTP::Get.new("/foodb/bartbl", {"connection" => "keepalive"})
           res = http.request(req)
         end
 
-        assert_equal(['application/json', ''], ext_handler.content_types)
       end
     ensure
-      # Revert the original Handler
-      Fluent::HttpInput.module_eval do
-        remove_const(:Handler) if const_defined?(:Handler)
-        const_set(:Handler, orig_handler)
-      end
+      $test_in_http_content_types_flag = false
     end
+    assert_equal(['application/json', ''], $test_in_http_content_types)
+    # Asserting keepalive
+    assert_equal $test_in_http_connection_object_ids[0], $test_in_http_connection_object_ids[1]
   end
 
   def post(path, params, header = {})
     http = Net::HTTP.new("127.0.0.1", PORT)
     req = Net::HTTP::Post.new(path, header)
     if params.is_a?(String)
+      unless header.has_key?('Content-Type')
+        header['Content-Type'] = 'application/octet-stream'
+      end
       req.body = params
     else
+      unless header.has_key?('Content-Type')
+        header['Content-Type'] = 'application/x-www-form-urlencoded'
+      end
       req.set_form_data(params)
     end
     http.request(req)

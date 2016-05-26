@@ -13,10 +13,12 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 #
-module Fluent
-  require 'fluent/configurable'
-  require 'fluent/engine'
 
+require 'fluent/configurable'
+require 'fluent/plugin'
+require 'fluent/output'
+
+module Fluent
   #
   # Agent is a resource unit who manages emittable plugins
   #
@@ -26,16 +28,23 @@ module Fluent
   class Agent
     include Configurable
 
-    def initialize(opts = {})
+    def initialize(log:)
       super()
 
       @context = nil
       @outputs = []
       @filters = []
-      @started_outputs = []
-      @started_filters = []
 
-      @log = Engine.log
+      @lifecycle_control_list = nil
+      # lifecycle_control_list is the list of plugins in this agent, and ordered
+      # from plugins which DOES emit, then DOESN'T emit
+      # (input -> output w/ router -> filter -> output w/o router)
+      # for start: use this order DESC
+      #   (because plugins which appears later in configurations will receive events from plugins which appears ealier)
+      # for stop/before_shutdown/shutdown/after_shutdown/close/terminate: use this order ASC
+      @lifecycle_cache = nil
+
+      @log = log
       @event_router = EventRouter.new(NoMatchMatch.new(log), self)
       @error_collector = nil
     end
@@ -51,9 +60,9 @@ module Fluent
       super
 
       # initialize <match> and <filter> elements
-      conf.elements.select { |e| e.name == 'filter' || e.name == 'match' }.each { |e|
+      conf.elements('filter', 'match').each { |e|
         pattern = e.arg.empty? ? '**' : e.arg
-        type = e['@type'] || e['type']
+        type = e['@type']
         if e.name == 'filter'
           add_filter(type, pattern, e)
         else
@@ -62,68 +71,67 @@ module Fluent
       }
     end
 
-    def start
-      @outputs.each { |o|
-        o.start
-        @started_outputs << o
-      }
+    def lifecycle_control_list
+      return @lifecycle_control_list if @lifecycle_control_list
 
-      @filters.each { |f|
-        f.start
-        @started_filters << f
+      lifecycle_control_list = {
+        input: [],
+        output_with_router: [],
+        filter: [],
+        output: [],
       }
-    end
+      if self.respond_to?(:inputs)
+        inputs.each do |i|
+          lifecycle_control_list[:input] << i
+        end
+      end
+      recursive_output_traverse = ->(o) {
+        if o.has_router?
+          lifecycle_control_list[:output_with_router] << o
+        else
+          lifecycle_control_list[:output] << o
+        end
 
-    def shutdown
-      @started_filters.map { |f|
-        Thread.new do
-          begin
-            f.shutdown
-          rescue => e
-            log.warn "unexpected error while shutting down filter plugins", :plugin => f.class, :plugin_id => f.plugin_id, :error_class => e.class, :error => e
-            log.warn_backtrace
+        if o.respond_to?(:outputs)
+          o.outputs.each do |store|
+            recursive_output_traverse.call(store)
           end
         end
-      }.each { |t| t.join }
-
-      # Output plugin as filter emits records at shutdown so emit problem still exist.
-      # This problem will be resolved after actual filter mechanizm.
-      @started_outputs.map { |o|
-        Thread.new do
-          begin
-            o.shutdown
-          rescue => e
-            log.warn "unexpected error while shutting down output plugins", :plugin => o.class, :plugin_id => o.plugin_id, :error_class => e.class, :error => e
-            log.warn_backtrace
-          end
-        end
-      }.each { |t| t.join }
-    end
-
-    def flush!
-      flush_recursive(@outputs)
-    end
-
-    def flush_recursive(array)
-      array.each { |o|
-        begin
-          if o.is_a?(BufferedOutput)
-            o.force_flush
-          elsif o.is_a?(MultiOutput)
-            flush_recursive(o.outputs)
-          end
-        rescue => e
-          log.debug "error while force flushing", :error_class => e.class, :error => e
-          log.debug_backtrace
-        end
       }
+      outputs.each do |o|
+        recursive_output_traverse.call(o)
+      end
+      filters.each do |f|
+        lifecycle_control_list[:filter] << f
+      end
+
+      @lifecycle_control_list = lifecycle_control_list
+    end
+
+    def lifecycle(desc: false)
+      kind_list = if desc
+                    [:output, :filter, :output_with_router]
+                  else
+                    [:output_with_router, :filter, :output]
+                  end
+      kind_list.each do |kind|
+        list = if desc
+                 lifecycle_control_list[kind].reverse
+               else
+                 lifecycle_control_list[kind]
+               end
+        display_kind = (kind == :output_with_router ? :output : kind)
+        list.each do |instance|
+          yield instance, display_kind
+        end
+      end
     end
 
     def add_match(type, pattern, conf)
       log.info "adding match#{@context.nil? ? '' : " in #{@context}"}", pattern: pattern, type: type
 
       output = Plugin.new_output(type)
-      output.router = @event_router
+      output.router = @event_router if output.respond_to?(:router=)
       output.configure(conf)
       @outputs << output
       @event_router.add_rule(pattern, output)
@@ -156,21 +164,21 @@ module Fluent
         @count = 0
       end
 
-      def emit(tag, es, chain)
+      def emit_events(tag, es)
         # TODO use time instead of num of records
         c = (@count += 1)
         if c < 512
           if Math.log(c) / Math.log(2) % 1.0 == 0
-            @log.warn "no patterns matched", :tag => tag
+            @log.warn "no patterns matched", tag: tag
             return
           end
         else
           if c % 512 == 0
-            @log.warn "no patterns matched", :tag => tag
+            @log.warn "no patterns matched", tag: tag
             return
           end
         end
-        @log.on_trace { @log.trace "no patterns matched", :tag => tag }
+        @log.on_trace { @log.trace "no patterns matched", tag: tag }
       end
 
       def start

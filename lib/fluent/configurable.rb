@@ -14,33 +14,36 @@
 #    limitations under the License.
 #
 
+require 'fluent/config/configure_proxy'
+require 'fluent/config/section'
+require 'fluent/config/error'
+require 'fluent/registry'
+require 'fluent/plugin'
+require 'fluent/config/types'
+
 module Fluent
-  require 'fluent/config/configure_proxy'
-  require 'fluent/config/section'
-  require 'fluent/config/error'
-  require 'fluent/registry'
-
   module Configurable
-    attr_reader :config
-
     def self.included(mod)
       mod.extend(ClassMethods)
     end
 
     def initialize
+      super
       # to simulate implicit 'attr_accessor' by config_param / config_section and its value by config_set_default
       proxy = self.class.merged_configure_proxy
       proxy.params.keys.each do |name|
+        next if name.to_s.start_with?('@')
         if proxy.defaults.has_key?(name)
           instance_variable_set("@#{name}".to_sym, proxy.defaults[name])
         end
       end
       proxy.sections.keys.each do |name|
+        next if name.to_s.start_with?('@')
         subproxy = proxy.sections[name]
         if subproxy.multi?
-          instance_variable_set("@#{subproxy.param_name}".to_sym, [])
+          instance_variable_set("@#{subproxy.variable_name}".to_sym, [])
         else
-          instance_variable_set("@#{subproxy.param_name}".to_sym, nil)
+          instance_variable_set("@#{subproxy.variable_name}".to_sym, nil)
         end
       end
     end
@@ -48,20 +51,36 @@ module Fluent
     def configure(conf)
       @config = conf
 
-      logger = self.respond_to?(:log) ? log : $log
+      logger = self.respond_to?(:log) ? log : (defined?($log) ? $log : nil)
       proxy = self.class.merged_configure_proxy
+      conf.corresponding_proxies << proxy
 
-      root = Fluent::Config::SectionGenerator.generate(proxy, conf, logger)
+      if self.respond_to?(:owner) && self.owner
+        owner_proxy = owner.class.merged_configure_proxy
+        if proxy.configured_in_section
+          owner_proxy = owner_proxy.sections[proxy.configured_in_section]
+        end
+        proxy.overwrite_defaults(owner_proxy) if owner_proxy
+      end
+
+      # In the nested section, can't get plugin class through proxies so get plugin class here
+      plugin_class = Fluent::Plugin.lookup_type_from_class(proxy.name.to_s)
+      root = Fluent::Config::SectionGenerator.generate(proxy, conf, logger, plugin_class)
       @config_root_section = root
 
       root.instance_eval{ @params.keys }.each do |param_name|
+        next if param_name.to_s.start_with?('@')
         varname = "@#{param_name}".to_sym
-        if (! root[param_name].nil?) || instance_variable_get(varname).nil?
+        if (! root[param_name].nil?) || (instance_variable_defined?(varname) && instance_variable_get(varname).nil?)
           instance_variable_set(varname, root[param_name])
         end
       end
 
       self
+    end
+
+    def config
+      @masked_config ||= @config.to_masked_element
     end
 
     CONFIG_TYPE_REGISTRY = Registry.new(:config_type, 'fluent/plugin/type_')
@@ -75,6 +94,20 @@ module Fluent
       CONFIG_TYPE_REGISTRY.lookup(type)
     end
 
+    {
+      string: Config::STRING_TYPE,
+      enum: Config::ENUM_TYPE,
+      integer: Config::INTEGER_TYPE,
+      float: Config::FLOAT_TYPE,
+      size: Config::SIZE_TYPE,
+      bool: Config::BOOL_TYPE,
+      time: Config::TIME_TYPE,
+      hash: Config::HASH_TYPE,
+      array: Config::ARRAY_TYPE,
+    }.each do |name, type|
+      register_type(name, type)
+    end
+
     module ClassMethods
       def configure_proxy_map
         map = {}
@@ -85,24 +118,38 @@ module Fluent
       def configure_proxy(mod_name)
         map = configure_proxy_map
         unless map[mod_name]
-          proxy = Fluent::Config::ConfigureProxy.new(mod_name, required: true, multi: false)
+          type_lookup = ->(type) { Fluent::Configurable.lookup_type(type) }
+          proxy = Fluent::Config::ConfigureProxy.new(mod_name, required: true, multi: false, type_lookup: type_lookup)
           map[mod_name] = proxy
         end
         map[mod_name]
       end
 
-      def config_param(name, *args, &block)
-        configure_proxy(self.name).config_param(name, *args, &block)
-        attr_accessor name
+      def configured_in(section_name)
+        configure_proxy(self.name).configured_in(section_name)
+      end
+
+      def config_param(name, type = nil, **kwargs, &block)
+        configure_proxy(self.name).config_param(name, type, **kwargs, &block)
+        # reserved names '@foo' are invalid as attr_accessor name
+        attr_accessor(name) unless kwargs[:skip_accessor] || Fluent::Config::Element::RESERVED_PARAMETERS.include?(name.to_s)
       end
 
       def config_set_default(name, defval)
         configure_proxy(self.name).config_set_default(name, defval)
       end
 
-      def config_section(name, *args, &block)
-        configure_proxy(self.name).config_section(name, *args, &block)
-        attr_accessor configure_proxy(self.name).sections[name].param_name
+      def config_set_desc(name, desc)
+        configure_proxy(self.name).config_set_desc(name, desc)
+      end
+
+      def config_section(name, **kwargs, &block)
+        configure_proxy(self.name).config_section(name, **kwargs, &block)
+        attr_accessor configure_proxy(self.name).sections[name].variable_name
+      end
+
+      def desc(description)
+        configure_proxy(self.name).desc(description)
       end
 
       def merged_configure_proxy
@@ -116,9 +163,10 @@ module Fluent
         # p AnyGreatClass.dup.name #=> nil
         configurables.map{ |a| a.configure_proxy(a.name || a.object_id.to_s) }.reduce(:merge)
       end
+
+      def dump(level = 0)
+        configure_proxy_map[self.to_s].dump(level)
+      end
     end
   end
-
-  # load default types
-  require 'fluent/config/types'
 end

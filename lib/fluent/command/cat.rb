@@ -21,13 +21,14 @@ op = OptionParser.new
 
 op.banner += " <tag>"
 
-port = Fluent::DEFAULT_LISTEN_PORT
+port = 24224
 host = '127.0.0.1'
 unix = false
 socket_path = Fluent::DEFAULT_SOCKET_PATH
 
 config_path = Fluent::DEFAULT_CONFIG_PATH
 format = 'json'
+message_key = 'message'
 
 op.on('-p', '--port PORT', "fluent tcp port (default: #{port})", Integer) {|i|
   port = i
@@ -57,7 +58,15 @@ op.on('--msgpack', "same as: -f msgpack", TrueClass) {|b|
   format = 'msgpack'
 }
 
-(class<<self;self;end).module_eval do
+op.on('--none', "same as: -f none", TrueClass) {|b|
+  format = 'none'
+}
+
+op.on('--message-key KEY', "key field for none format (default: #{message_key})") {|s|
+  message_key = s
+}
+
+(class << self; self; end).module_eval do
   define_method(:usage) do |msg|
     puts op.to_s
     puts "error: #{msg}" if msg
@@ -279,12 +288,25 @@ when 'json'
   end
 
 when 'msgpack'
+  require 'fluent/engine'
+
   begin
-    u = MessagePack::Unpacker.new($stdin)
+    u = Fluent::Engine.msgpack_factory.unpacker($stdin)
     u.each {|record|
       w.write(record)
     }
   rescue EOFError
+  rescue
+    $stderr.puts $!
+    exit 1
+  end
+
+when 'none'
+  begin
+    while line = $stdin.gets
+      record = { message_key => line.chomp }
+      w.write(record)
+    end
   rescue
     $stderr.puts $!
     exit 1

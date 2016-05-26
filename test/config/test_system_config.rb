@@ -2,7 +2,7 @@ require_relative '../helper'
 require 'fluent/configurable'
 require 'fluent/config/element'
 require 'fluent/config/section'
-require 'fluent/supervisor'
+require 'fluent/system_config'
 
 module Fluent::Config
   class FakeLoggerInitializer
@@ -20,6 +20,9 @@ module Fluent::Config
       @suppress_config_dump = nil
       @suppress_repeated_stacktrace = nil
       @without_source = nil
+      @emit_error_log_interval = nil
+      @file_permission = nil
+      @dir_permission = nil
     end
   end
 
@@ -36,7 +39,7 @@ module Fluent::Config
         </system>
       EOS
       s = FakeSupervisor.new
-      sc = Fluent::Supervisor::SystemConfig.new(conf)
+      sc = Fluent::SystemConfig.new(conf)
       sc.apply(s)
       assert_nil(sc.log_level)
       assert_nil(sc.suppress_repeated_stacktrace)
@@ -48,6 +51,8 @@ module Fluent::Config
       assert_nil(s.instance_variable_get(:@emit_error_log_interval))
       assert_nil(s.instance_variable_get(:@suppress_config_dump))
       assert_nil(s.instance_variable_get(:@without_source))
+      assert_nil(s.instance_variable_get(:@file_permission))
+      assert_nil(s.instance_variable_get(:@dir_permission))
     end
 
     {'log_level' => 'error',
@@ -63,7 +68,7 @@ module Fluent::Config
           </system>
         EOS
         s = FakeSupervisor.new
-        sc = Fluent::Supervisor::SystemConfig.new(conf)
+        sc = Fluent::SystemConfig.new(conf)
         sc.apply(s)
         assert_not_nil(sc.instance_variable_get("@#{k}"))
         key = (k == 'emit_error_log_interval' ? 'suppress_interval' : k)
@@ -74,13 +79,15 @@ module Fluent::Config
     {'foo' => 'bar', 'hoge' => 'fuga'}.each { |k, v|
       test "should not affect settable parameters with unknown #{k} parameter" do
         s = FakeSupervisor.new
-        sc = Fluent::Supervisor::SystemConfig.new({k => v})
+        sc = Fluent::SystemConfig.new({k => v})
         sc.apply(s)
         assert_nil(s.instance_variable_get(:@log_level))
         assert_nil(s.instance_variable_get(:@suppress_repeated_stacktrace))
         assert_nil(s.instance_variable_get(:@emit_error_log_interval))
         assert_nil(s.instance_variable_get(:@suppress_config_dump))
         assert_nil(s.instance_variable_get(:@without_source))
+        assert_nil(s.instance_variable_get(:@file_permission))
+        assert_nil(s.instance_variable_get(:@dir_permission))
       end
     }
 
@@ -91,9 +98,23 @@ module Fluent::Config
         </system>
       EOS
       s = FakeSupervisor.new
-      sc = Fluent::Supervisor::SystemConfig.new(conf)
+      sc = Fluent::SystemConfig.new(conf)
       sc.apply(s)
       assert_equal(Fluent::Log::LEVEL_WARN, s.instance_variable_get("@log").level)
+    end
+
+    test 'process global overridable variables' do
+      conf = parse_text(<<-EOS)
+        <system>
+          file_permission 0655
+          dir_permission 0765
+        </system>
+      EOS
+      s = FakeSupervisor.new
+      sc = Fluent::SystemConfig.new(conf)
+      sc.apply(s)
+      assert_equal(0655, s.instance_variable_get(:@file_permission))
+      assert_equal(0765, s.instance_variable_get(:@dir_permission))
     end
   end
 end

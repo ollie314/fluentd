@@ -5,7 +5,7 @@ require 'fileutils'
 require 'rake/testtask'
 require 'rake/clean'
 
-task :test => [:base_test]
+task test: [:base_test]
 
 desc 'Run test_unit based test'
 Rake::TestTask.new(:base_test) do |t|
@@ -15,7 +15,8 @@ Rake::TestTask.new(:base_test) do |t|
   t.libs << "test"
   t.test_files = Dir["test/**/test_*.rb"].sort
   t.verbose = true
-  #t.warning = true
+  t.warning = true
+  t.ruby_opts = ["-Eascii-8bit:ascii-8bit"]
 end
 
 task :parallel_test do
@@ -30,4 +31,4 @@ task :coverage do |t|
   Rake::Task["test"].invoke
 end
 
-task :default => [:test, :build]
+task default: [:test, :build]

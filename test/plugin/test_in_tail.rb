@@ -1,15 +1,29 @@
 require_relative '../helper'
 require 'fluent/test'
+require 'fluent/plugin/in_tail'
+require 'fluent/plugin/buffer'
+require 'fluent/system_config'
 require 'net/http'
-require 'flexmock'
+require 'flexmock/test_unit'
 
 class TailInputTest < Test::Unit::TestCase
   include FlexMock::TestCase
 
   def setup
     Fluent::Test.setup
-    FileUtils.rm_rf(TMP_DIR)
+    FileUtils.rm_rf(TMP_DIR, secure: true)
+    if File.exist?(TMP_DIR)
+      # ensure files are closed for Windows, on which deleted files
+      # are still visible from filesystem
+      GC.start(full_mark: true, immediate_mark: true, immediate_sweep: true)
+      FileUtils.remove_entry_secure(TMP_DIR)
+    end
     FileUtils.mkdir_p(TMP_DIR)
+  end
+
+  def teardown
+    super
+    Fluent::Engine.stop
   end
 
   TMP_DIR = File.dirname(__FILE__) + "/../tmp/tail#{ENV['TEST_ENV_NUMBER']}"
@@ -24,6 +38,9 @@ class TailInputTest < Test::Unit::TestCase
   ]
   CONFIG_READ_FROM_HEAD = %[
     read_from_head true
+  ]
+  CONFIG_ENABLE_WATCH_TIMER = %[
+    enable_watch_timer false
   ]
   SINGLE_LINE_CONFIG = %[
     format /(?<message>.*)/
@@ -43,10 +60,21 @@ class TailInputTest < Test::Unit::TestCase
     assert_equal 1000, d.instance.read_lines_limit
   end
 
+  def test_configure_encoding
+    # valid encoding
+    d = create_driver(SINGLE_LINE_CONFIG + 'encoding utf-8')
+    assert_equal Encoding::UTF_8, d.instance.encoding
+
+    # invalid encoding
+    assert_raise(Fluent::ConfigError) do
+      create_driver(SINGLE_LINE_CONFIG + 'encoding no-such-encoding')
+    end
+  end
+
   # TODO: Should using more better approach instead of sleep wait
 
   def test_emit
-    File.open("#{TMP_DIR}/tail.txt", "w") {|f|
+    File.open("#{TMP_DIR}/tail.txt", "wb") {|f|
       f.puts "test1"
       f.puts "test2"
     }
@@ -56,7 +84,7 @@ class TailInputTest < Test::Unit::TestCase
     d.run do
       sleep 1
 
-      File.open("#{TMP_DIR}/tail.txt", "a") {|f|
+      File.open("#{TMP_DIR}/tail.txt", "ab") {|f|
         f.puts "test3"
         f.puts "test4"
       }
@@ -67,7 +95,69 @@ class TailInputTest < Test::Unit::TestCase
     assert_equal(true, emits.length > 0)
     assert_equal({"message" => "test3"}, emits[0][2])
     assert_equal({"message" => "test4"}, emits[1][2])
+    assert(emits[0][1].is_a?(Fluent::EventTime))
+    assert(emits[1][1].is_a?(Fluent::EventTime))
     assert_equal(1, d.emit_streams.size)
+  end
+
+  class TestWithSystem < self
+    include Fluent::SystemConfig::Mixin
+
+    OVERRIDE_FILE_PERMISSION = 0620
+    CONFIG_SYSTEM = %[
+      <system>
+        file_permission #{OVERRIDE_FILE_PERMISSION}
+      </system>
+    ]
+
+    def setup
+      omit "NTFS doesn't support UNIX like permissions" if Fluent.windows?
+      # Store default permission
+      @default_permission = system_config.instance_variable_get(:@file_permission)
+    end
+
+    def teardown
+      # Restore default permission
+      system_config.instance_variable_set(:@file_permission, @default_permission)
+    end
+
+    def parse_system(text)
+      basepath = File.expand_path(File.dirname(__FILE__) + '/../../')
+      Fluent::Config.parse(text, '(test)', basepath, true).elements.find { |e| e.name == 'system' }
+    end
+
+    def test_emit_with_system
+      system_conf = parse_system(CONFIG_SYSTEM)
+      sc = Fluent::SystemConfig.new(system_conf)
+      Fluent::Engine.init(sc)
+      File.open("#{TMP_DIR}/tail.txt", "wb") {|f|
+        f.puts "test1"
+        f.puts "test2"
+      }
+
+      d = create_driver
+
+      d.run do
+        sleep 1
+
+        File.open("#{TMP_DIR}/tail.txt", "ab") {|f|
+          f.puts "test3"
+          f.puts "test4"
+        }
+        sleep 1
+      end
+
+      emits = d.emits
+      assert_equal(true, emits.length > 0)
+      assert_equal({"message" => "test3"}, emits[0][2])
+      assert_equal({"message" => "test4"}, emits[1][2])
+      assert(emits[0][1].is_a?(Fluent::EventTime))
+      assert(emits[1][1].is_a?(Fluent::EventTime))
+      assert_equal(1, d.emit_streams.size)
+      pos = d.instance.instance_variable_get(:@pf_file)
+      mode = "%o" % File.stat(pos).mode
+      assert_equal OVERRIDE_FILE_PERMISSION, mode[-3, 3].to_i
+    end
   end
 
   data('1' => [1, 2], '10' => [10, 1])
@@ -79,7 +169,7 @@ class TailInputTest < Test::Unit::TestCase
     d.run do
       sleep 1
 
-      File.open("#{TMP_DIR}/tail.txt", "a") {|f|
+      File.open("#{TMP_DIR}/tail.txt", "ab") {|f|
         f.puts msg
         f.puts msg
       }
@@ -94,7 +184,7 @@ class TailInputTest < Test::Unit::TestCase
   end
 
   def test_emit_with_read_from_head
-    File.open("#{TMP_DIR}/tail.txt", "w") {|f|
+    File.open("#{TMP_DIR}/tail.txt", "wb") {|f|
       f.puts "test1"
       f.puts "test2"
     }
@@ -104,7 +194,7 @@ class TailInputTest < Test::Unit::TestCase
     d.run do
       sleep 1
 
-      File.open("#{TMP_DIR}/tail.txt", "a") {|f|
+      File.open("#{TMP_DIR}/tail.txt", "ab") {|f|
         f.puts "test3"
         f.puts "test4"
       }
@@ -117,6 +207,32 @@ class TailInputTest < Test::Unit::TestCase
     assert_equal({"message" => "test2"}, emits[1][2])
     assert_equal({"message" => "test3"}, emits[2][2])
     assert_equal({"message" => "test4"}, emits[3][2])
+  end
+
+  def test_emit_with_enable_watch_timer
+    File.open("#{TMP_DIR}/tail.txt", "wb") {|f|
+      f.puts "test1"
+      f.puts "test2"
+    }
+
+    d = create_driver(CONFIG_ENABLE_WATCH_TIMER + SINGLE_LINE_CONFIG)
+
+    d.run do
+      sleep 1
+
+      File.open("#{TMP_DIR}/tail.txt", "ab") {|f|
+        f.puts "test3"
+        f.puts "test4"
+      }
+      # according to cool.io's stat_watcher.c, systems without inotify will use
+      # an "automatic" value, typically around 5 seconds
+      sleep 10
+    end
+
+    emits = d.emits
+    assert(emits.length > 0)
+    assert_equal({"message" => "test3"}, emits[0][2])
+    assert_equal({"message" => "test4"}, emits[1][2])
   end
 
   def test_rotate_file
@@ -141,13 +257,13 @@ class TailInputTest < Test::Unit::TestCase
 
   def test_rotate_file_with_write_old
     emits = sub_test_rotate_file(SINGLE_LINE_CONFIG) { |rotated_file|
-      File.open("#{TMP_DIR}/tail.txt", "w") { |f| }
+      File.open("#{TMP_DIR}/tail.txt", "wb") { |f| }
       rotated_file.puts "test7"
       rotated_file.puts "test8"
       rotated_file.flush
 
       sleep 1
-      File.open("#{TMP_DIR}/tail.txt", "a") { |f|
+      File.open("#{TMP_DIR}/tail.txt", "ab") { |f|
         f.puts "test5"
         f.puts "test6"
       }
@@ -175,7 +291,7 @@ class TailInputTest < Test::Unit::TestCase
   end
 
   def sub_test_rotate_file(config = nil)
-    file = File.open("#{TMP_DIR}/tail.txt", "w")
+    file = Fluent::FileWrapper.open("#{TMP_DIR}/tail.txt", "wb")
     file.puts "test1"
     file.puts "test2"
     file.flush
@@ -195,10 +311,10 @@ class TailInputTest < Test::Unit::TestCase
         sleep 1
       else
         sleep 1
-        File.open("#{TMP_DIR}/tail.txt", "w") { |f| }
+        File.open("#{TMP_DIR}/tail.txt", "wb") { |f| }
         sleep 1
 
-        File.open("#{TMP_DIR}/tail.txt", "a") { |f|
+        File.open("#{TMP_DIR}/tail.txt", "ab") { |f|
           f.puts "test5"
           f.puts "test6"
         }
@@ -212,21 +328,21 @@ class TailInputTest < Test::Unit::TestCase
 
     d.emits
   ensure
-    file.close
+    file.close if file
   end
 
   def test_lf
-    File.open("#{TMP_DIR}/tail.txt", "w") {|f| }
+    File.open("#{TMP_DIR}/tail.txt", "wb") {|f| }
 
     d = create_driver
 
     d.run do
-      File.open("#{TMP_DIR}/tail.txt", "a") {|f|
+      File.open("#{TMP_DIR}/tail.txt", "ab") {|f|
         f.print "test3"
       }
       sleep 1
 
-      File.open("#{TMP_DIR}/tail.txt", "a") {|f|
+      File.open("#{TMP_DIR}/tail.txt", "ab") {|f|
         f.puts "test4"
       }
       sleep 1
@@ -238,14 +354,14 @@ class TailInputTest < Test::Unit::TestCase
   end
 
   def test_whitespace
-    File.open("#{TMP_DIR}/tail.txt", "w") {|f| }
+    File.open("#{TMP_DIR}/tail.txt", "wb") {|f| }
 
     d = create_driver
 
     d.run do
       sleep 1
 
-      File.open("#{TMP_DIR}/tail.txt", "a") {|f|
+      File.open("#{TMP_DIR}/tail.txt", "ab") {|f|
         f.puts "    "		# 4 spaces
         f.puts "    4 spaces"
         f.puts "4 spaces    "
@@ -266,10 +382,31 @@ class TailInputTest < Test::Unit::TestCase
     assert_equal({"message" => "tab	"}, emits[5][2])
   end
 
+  data(
+    'default encoding' => ['', Encoding::ASCII_8BIT],
+    'explicit encoding config' => ['encoding utf-8', Encoding::UTF_8])
+  def test_encoding(data)
+    encoding_config, encoding = data
+
+    d = create_driver(SINGLE_LINE_CONFIG + CONFIG_READ_FROM_HEAD + encoding_config)
+
+    d.run do
+      sleep 1
+
+      File.open("#{TMP_DIR}/tail.txt", "wb") {|f|
+        f.puts "test"
+      }
+      sleep 1
+    end
+
+    emits = d.emits
+    assert_equal(encoding, emits[0][2]['message'].encoding)
+  end
+
   # multiline mode test
 
   def test_multiline
-    File.open("#{TMP_DIR}/tail.txt", "w") { |f| }
+    File.open("#{TMP_DIR}/tail.txt", "wb") { |f| }
 
     d = create_driver %[
       format multiline
@@ -277,7 +414,7 @@ class TailInputTest < Test::Unit::TestCase
       format_firstline /^[s]/
     ]
     d.run do
-      File.open("#{TMP_DIR}/tail.txt", "a") { |f|
+      File.open("#{TMP_DIR}/tail.txt", "ab") { |f|
         f.puts "f test1"
         f.puts "s test2"
         f.puts "f test3"
@@ -288,18 +425,90 @@ class TailInputTest < Test::Unit::TestCase
         f.puts "s test8"
       }
       sleep 1
+
+      emits = d.emits
+      assert(emits.length == 3)
+      assert_equal({"message1" => "test2", "message2" => "test3", "message3" => "test4"}, emits[0][2])
+      assert_equal({"message1" => "test5"}, emits[1][2])
+      assert_equal({"message1" => "test6", "message2" => "test7"}, emits[2][2])
+
+      sleep 3
+      emits = d.emits
+      assert(emits.length == 3)
     end
 
     emits = d.emits
-    assert(emits.length > 0)
-    assert_equal({"message1" => "test2", "message2" => "test3", "message3" => "test4"}, emits[0][2])
-    assert_equal({"message1" => "test5"}, emits[1][2])
-    assert_equal({"message1" => "test6", "message2" => "test7"}, emits[2][2])
+    assert(emits.length == 4)
     assert_equal({"message1" => "test8"}, emits[3][2])
   end
 
+  def test_multiline_with_flush_interval
+    File.open("#{TMP_DIR}/tail.txt", "wb") { |f| }
+
+    d = create_driver %[
+      format multiline
+      format1 /^s (?<message1>[^\\n]+)(\\nf (?<message2>[^\\n]+))?(\\nf (?<message3>.*))?/
+      format_firstline /^[s]/
+      multiline_flush_interval 2s
+    ]
+
+    assert_equal 2, d.instance.multiline_flush_interval
+
+    d.run do
+      File.open("#{TMP_DIR}/tail.txt", "ab") { |f|
+        f.puts "f test1"
+        f.puts "s test2"
+        f.puts "f test3"
+        f.puts "f test4"
+        f.puts "s test5"
+        f.puts "s test6"
+        f.puts "f test7"
+        f.puts "s test8"
+      }
+      sleep 1
+
+      emits = d.emits
+      assert(emits.length == 3)
+      assert_equal({"message1" => "test2", "message2" => "test3", "message3" => "test4"}, emits[0][2])
+      assert_equal({"message1" => "test5"}, emits[1][2])
+      assert_equal({"message1" => "test6", "message2" => "test7"}, emits[2][2])
+
+      sleep 3
+      emits = d.emits
+      assert(emits.length == 4)
+      assert_equal({"message1" => "test8"}, emits[3][2])
+    end
+  end
+
+  data(
+    'default encoding' => ['', Encoding::ASCII_8BIT],
+    'explicit encoding config' => ['encoding utf-8', Encoding::UTF_8])
+  def test_multiline_encoding_of_flushed_record(data)
+    encoding_config, encoding = data
+
+    d = create_driver %[
+      format multiline
+      format1 /^s (?<message1>[^\\n]+)(\\nf (?<message2>[^\\n]+))?(\\nf (?<message3>.*))?/
+      format_firstline /^[s]/
+      multiline_flush_interval 2s
+      read_from_head true
+      #{encoding_config}
+    ]
+
+    d.run do
+      File.open("#{TMP_DIR}/tail.txt", "wb") { |f|
+        f.puts "s test"
+      }
+
+      sleep 4
+      emits = d.emits
+      assert_equal(1, emits.length)
+      assert_equal(encoding, emits[0][2]['message1'].encoding)
+    end
+  end
+
   def test_multiline_with_multiple_formats
-    File.open("#{TMP_DIR}/tail.txt", "w") { |f| }
+    File.open("#{TMP_DIR}/tail.txt", "wb") { |f| }
 
     d = create_driver %[
       format multiline
@@ -309,7 +518,7 @@ class TailInputTest < Test::Unit::TestCase
       format_firstline /^[s]/
     ]
     d.run do
-      File.open("#{TMP_DIR}/tail.txt", "a") { |f|
+      File.open("#{TMP_DIR}/tail.txt", "ab") { |f|
         f.puts "f test1"
         f.puts "s test2"
         f.puts "f test3"
@@ -332,7 +541,7 @@ class TailInputTest < Test::Unit::TestCase
 
   def test_multilinelog_with_multiple_paths
     files = ["#{TMP_DIR}/tail1.txt", "#{TMP_DIR}/tail2.txt"]
-    files.each { |file| File.open(file, "w") { |f| } }
+    files.each { |file| File.open(file, "wb") { |f| } }
 
     d = create_driver(%[
       path #{files[0]},#{files[1]}
@@ -343,7 +552,7 @@ class TailInputTest < Test::Unit::TestCase
     ], false)
     d.run do
       files.each do |file|
-        File.open(file, 'a') { |f|
+        File.open(file, 'ab') { |f|
           f.puts "f #{file} line should be ignored"
           f.puts "s test1"
           f.puts "f test2"
@@ -363,7 +572,7 @@ class TailInputTest < Test::Unit::TestCase
   end
 
   def test_multiline_without_firstline
-    File.open("#{TMP_DIR}/tail.txt", "w") { |f| }
+    File.open("#{TMP_DIR}/tail.txt", "wb") { |f| }
 
     d = create_driver %[
       format multiline
@@ -372,7 +581,7 @@ class TailInputTest < Test::Unit::TestCase
       format3 /(?<var3>baz \\d)/
     ]
     d.run do
-      File.open("#{TMP_DIR}/tail.txt", "a") { |f|
+      File.open("#{TMP_DIR}/tail.txt", "ab") { |f|
         f.puts "foo 1"
         f.puts "bar 1"
         f.puts "baz 1"
@@ -421,20 +630,20 @@ class TailInputTest < Test::Unit::TestCase
     assert_equal EX_PATHS - [EX_PATHS.last], plugin.expand_paths.sort
   end
 
-  def test_refresh_watchers
+  def test_z_refresh_watchers
     plugin = create_driver(EX_CONFIG, false).instance
     sio = StringIO.new
     plugin.instance_eval do
       @pf = Fluent::NewTailInput::PositionFile.parse(sio)
       @loop = Coolio::Loop.new
-   end
+    end
 
     flexstub(Time) do |timeclass|
       timeclass.should_receive(:now).with_no_args.and_return(Time.new(2010, 1, 2, 3, 4, 5), Time.new(2010, 1, 2, 3, 4, 6), Time.new(2010, 1, 2, 3, 4, 7))
 
       flexstub(Fluent::NewTailInput::TailWatcher) do |watcherclass|
         EX_PATHS.each do |path|
-          watcherclass.should_receive(:new).with(path, EX_RORATE_WAIT, Fluent::NewTailInput::FilePositionEntry, any, true, 1000, any, any).once.and_return do
+          watcherclass.should_receive(:new).with(path, EX_RORATE_WAIT, Fluent::NewTailInput::FilePositionEntry, any, true, true, 1000, any, any, any).once.and_return do
             flexmock('TailWatcher') { |watcher|
               watcher.should_receive(:attach).once
               watcher.should_receive(:unwatched=).zero_or_more_times
@@ -450,7 +659,7 @@ class TailInputTest < Test::Unit::TestCase
       end
 
       flexstub(Fluent::NewTailInput::TailWatcher) do |watcherclass|
-        watcherclass.should_receive(:new).with('test/plugin/data/2010/01/20100102-030406.log', EX_RORATE_WAIT, Fluent::NewTailInput::FilePositionEntry, any, true, 1000, any, any).once.and_return do
+        watcherclass.should_receive(:new).with('test/plugin/data/2010/01/20100102-030406.log', EX_RORATE_WAIT, Fluent::NewTailInput::FilePositionEntry, any, true, true, 1000, any, any, any).once.and_return do
           flexmock('TailWatcher') do |watcher|
             watcher.should_receive(:attach).once
             watcher.should_receive(:unwatched=).zero_or_more_times
@@ -528,7 +737,7 @@ class TailInputTest < Test::Unit::TestCase
   # Ensure that no fatal exception is raised when a file is missing and that
   # files that do exist are still tailed as expected.
   def test_missing_file
-    File.open("#{TMP_DIR}/tail.txt", "w") {|f|
+    File.open("#{TMP_DIR}/tail.txt", "wb") {|f|
       f.puts "test1"
       f.puts "test2"
     }
@@ -547,7 +756,7 @@ class TailInputTest < Test::Unit::TestCase
       d = create_driver(config, false)
       d.run do
         sleep 1
-        File.open("#{TMP_DIR}/tail.txt", "a") {|f|
+        File.open("#{TMP_DIR}/tail.txt", "ab") {|f|
           f.puts "test3"
           f.puts "test4"
         }
@@ -557,6 +766,163 @@ class TailInputTest < Test::Unit::TestCase
       assert_equal(2, emits.length)
       assert_equal({"message" => "test3"}, emits[0][2])
       assert_equal({"message" => "test4"}, emits[1][2])
+    end
+  end
+
+  sub_test_case 'emit error cases' do
+    def test_emit_error_with_buffer_queue_limit_error
+      emits = execute_test(Fluent::Plugin::Buffer::BufferOverflowError, "buffer space has too many data")
+      assert_equal(10, emits.length)
+      10.times { |i|
+        assert_equal({"message" => "test#{i}"}, emits[i][2])
+      }
+    end
+
+    def test_emit_error_with_non_buffer_queue_limit_error
+      emits = execute_test(StandardError, "non BufferQueueLimitError error")
+      assert_true(emits.size > 0 && emits.size != 10)
+      emits.size.times { |i|
+        assert_equal({"message" => "test#{10 - emits.size + i}"}, emits[i][2])
+      }
+    end
+
+    def execute_test(error_class, error_message)
+      d = create_driver(CONFIG_READ_FROM_HEAD + SINGLE_LINE_CONFIG)
+      # Use define_singleton_method instead of d.emit_stream to capture local variable
+      d.define_singleton_method(:emit_stream) do |tag, es|
+        @test_num_errors ||= 0
+        if @test_num_errors < 5
+          @test_num_errors += 1
+          raise error_class, error_message
+        else
+          @emit_streams << [tag, es.to_a]
+        end
+      end
+
+      d.run do
+        10.times { |i|
+          File.open("#{TMP_DIR}/tail.txt", "ab") { |f| f.puts "test#{i}" }
+          sleep 0.5
+        }
+        sleep 1
+      end
+
+      d.emits
+    end
+  end
+
+  sub_test_case "tail_path" do
+    def test_tail_path_with_singleline
+      File.open("#{TMP_DIR}/tail.txt", "wb") {|f|
+        f.puts "test1"
+        f.puts "test2"
+      }
+
+      d = create_driver(%[path_key path] + SINGLE_LINE_CONFIG)
+
+      d.run do
+        sleep 1
+
+        File.open("#{TMP_DIR}/tail.txt", "ab") {|f|
+          f.puts "test3"
+          f.puts "test4"
+        }
+        sleep 1
+      end
+
+      emits = d.emits
+      assert_equal(true, emits.length > 0)
+      emits.each do |emit|
+        assert_equal("#{TMP_DIR}/tail.txt", emit[2]["path"])
+      end
+    end
+
+    def test_tail_path_with_multiline_with_firstline
+      File.open("#{TMP_DIR}/tail.txt", "wb") { |f| }
+
+      d = create_driver %[
+        path_key path
+        format multiline
+        format1 /^s (?<message1>[^\\n]+)(\\nf (?<message2>[^\\n]+))?(\\nf (?<message3>.*))?/
+        format_firstline /^[s]/
+      ]
+      d.run do
+        File.open("#{TMP_DIR}/tail.txt", "ab") { |f|
+          f.puts "f test1"
+          f.puts "s test2"
+          f.puts "f test3"
+          f.puts "f test4"
+          f.puts "s test5"
+          f.puts "s test6"
+          f.puts "f test7"
+          f.puts "s test8"
+        }
+        sleep 1
+      end
+
+      emits = d.emits
+      assert(emits.length == 4)
+      emits.each do |emit|
+        assert_equal("#{TMP_DIR}/tail.txt", emit[2]["path"])
+      end
+    end
+
+    def test_tail_path_with_multiline_without_firstline
+      File.open("#{TMP_DIR}/tail.txt", "wb") { |f| }
+
+      d = create_driver %[
+        path_key path
+        format multiline
+        format1 /(?<var1>foo \\d)\\n/
+        format2 /(?<var2>bar \\d)\\n/
+        format3 /(?<var3>baz \\d)/
+      ]
+      d.run do
+        File.open("#{TMP_DIR}/tail.txt", "ab") { |f|
+          f.puts "foo 1"
+          f.puts "bar 1"
+          f.puts "baz 1"
+        }
+        sleep 1
+      end
+
+      emits = d.emits
+      assert(emits.length > 0)
+      emits.each do |emit|
+        assert_equal("#{TMP_DIR}/tail.txt", emit[2]["path"])
+      end
+    end
+
+    def test_tail_path_with_multiline_with_multiple_paths
+      files = ["#{TMP_DIR}/tail1.txt", "#{TMP_DIR}/tail2.txt"]
+      files.each { |file| File.open(file, "wb") { |f| } }
+
+      d = create_driver(%[
+        path #{files[0]},#{files[1]}
+        path_key path
+        tag t1
+        format multiline
+        format1 /^[s|f] (?<message>.*)/
+        format_firstline /^[s]/
+      ], false)
+      d.run do
+        files.each do |file|
+          File.open(file, 'ab') { |f|
+            f.puts "f #{file} line should be ignored"
+            f.puts "s test1"
+            f.puts "f test2"
+            f.puts "f test3"
+            f.puts "s test4"
+          }
+        end
+        sleep 1
+      end
+
+      emits = d.emits
+      assert(emits.length == 4)
+      assert_equal(files, [emits[0][2]["path"], emits[1][2]["path"]].sort)
+      # "test4" events are here because these events are flushed at shutdown phase
+      assert_equal(files, [emits[2][2]["path"], emits[3][2]["path"]].sort)
     end
   end
 end

@@ -1,7 +1,7 @@
 require_relative '../helper'
 require 'fluent/plugin/filter_stdout'
 require 'timecop'
-require 'flexmock'
+require 'flexmock/test_unit'
 
 class StdoutFilterTest < Test::Unit::TestCase
   include Fluent
@@ -13,6 +13,8 @@ class StdoutFilterTest < Test::Unit::TestCase
   end
 
   def teardown
+    super # FlexMock::TestCase requires this
+    # http://flexmock.rubyforge.org/FlexMock/TestCase.html
     Timecop.return
   end
 
@@ -32,7 +34,7 @@ class StdoutFilterTest < Test::Unit::TestCase
   def test_through_record
     d = create_driver
     time = Time.now
-    filtered = emit(d, {'test' => 'test'}, time)
+    filtered = emit(d, {'test' => 'test'}, Fluent::EventTime.from_time(time))
     assert_equal({'test' => 'test'}, filtered)
   end
 
@@ -59,7 +61,7 @@ class StdoutFilterTest < Test::Unit::TestCase
   def test_output_type_json
     d = create_driver(CONFIG + "\noutput_type json")
     time = Time.now
-    out = capture_log(d) { emit(d, {'test' => 'test'}, time) }
+    out = capture_log(d) { emit(d, {'test' => 'test'}, Fluent::EventTime.from_time(time)) }
     assert_equal "#{time.localtime} filter.test: {\"test\":\"test\"}\n", out
 
     # NOTE: Float::NAN is not jsonable
@@ -71,12 +73,12 @@ class StdoutFilterTest < Test::Unit::TestCase
   def test_output_type_hash
     d = create_driver(CONFIG + "\noutput_type hash")
     time = Time.now
-    out = capture_log(d) { emit(d, {'test' => 'test'}, time) }
+    out = capture_log(d) { emit(d, {'test' => 'test'}, Fluent::EventTime.from_time(time)) }
     assert_equal "#{time.localtime} filter.test: {\"test\"=>\"test\"}\n", out
 
     # NOTE: Float::NAN is not jsonable, but hash string can output it.
     d = create_driver(CONFIG + "\noutput_type hash")
-    out = capture_log(d) { emit(d, {'test' => Float::NAN}, time) }
+    out = capture_log(d) { emit(d, {'test' => Float::NAN}, Fluent::EventTime.from_time(time)) }
     assert_equal "#{time.localtime} filter.test: {\"test\"=>NaN}\n", out
   end
 
@@ -84,7 +86,7 @@ class StdoutFilterTest < Test::Unit::TestCase
   def test_include_time_key
     d = create_driver(CONFIG + "\noutput_type json\ninclude_time_key true\nutc")
     time = Time.now
-    message_time = Time.parse("2011-01-02 13:14:15 UTC").to_i
+    message_time = Fluent::EventTime.parse("2011-01-02 13:14:15 UTC")
     out = capture_log(d) { emit(d, {'test' => 'test'}, message_time) }
     assert_equal "#{time.localtime} filter.test: {\"test\":\"test\",\"time\":\"2011-01-02T13:14:15Z\"}\n", out
   end
@@ -93,7 +95,7 @@ class StdoutFilterTest < Test::Unit::TestCase
   def test_format_json
     d = create_driver(CONFIG + "\nformat json")
     time = Time.now
-    out = capture_log(d) { emit(d, {'test' => 'test'}, time) }
+    out = capture_log(d) { emit(d, {'test' => 'test'}, Fluent::EventTime.from_time(time)) }
     assert_equal "{\"test\":\"test\"}\n", out
   end
 
@@ -101,12 +103,12 @@ class StdoutFilterTest < Test::Unit::TestCase
 
   # Capture the log output of the block given
   def capture_log(d, &block)
-    tmp = d.instance.log
-    d.instance.log = StringIO.new
+    tmp = d.instance.log.out
+    d.instance.log.out = StringIO.new
     yield
-    return d.instance.log.string
+    return d.instance.log.out.string
   ensure
-    d.instance.log = tmp
+    d.instance.log.out = tmp
   end
 end
 

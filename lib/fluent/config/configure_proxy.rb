@@ -17,7 +17,8 @@
 module Fluent
   module Config
     class ConfigureProxy
-      attr_accessor :name, :final, :param_name, :required, :multi, :alias, :argument, :params, :defaults, :sections
+      attr_accessor :name, :final, :param_name, :init, :required, :multi, :alias, :configured_in_section
+      attr_accessor :argument, :params, :defaults, :descriptions, :sections
       # config_param :desc, :string, :default => '....'
       # config_set_default :buffer_type, :memory
       #
@@ -36,19 +37,38 @@ module Fluent
       #   end
       # end
 
-      def initialize(name, opts = {})
+      def initialize(name, param_name: nil, final: nil, init: nil, required: nil, multi: nil, alias: nil, type_lookup:)
         @name = name.to_sym
-        @final = opts.fetch(:final, false)
+        @final = final
 
-        @param_name = (opts[:param_name] || @name).to_sym
-        @required = opts[:required]
-        @multi = opts[:multi]
-        @alias = opts[:alias]
+        @param_name = param_name && param_name.to_sym
+        @init = init
+        @required = required
+        @multi = multi
+        @alias = binding.local_variable_get(:alias)
+        @type_lookup = type_lookup
+
+        raise "init and required are exclusive" if @init && @required
+
+        # specify section name for viewpoint of owner(parent) plugin
+        # for buffer plugins: all params are in <buffer> section of owner
+        # others: <storage>, <format> (formatter/parser), ...
+        @configured_in_section = nil
 
         @argument = nil # nil: ignore argument
         @params = {}
         @defaults = {}
+        @descriptions = {}
         @sections = {}
+        @current_description = nil
+      end
+
+      def variable_name
+        @param_name || @name
+      end
+
+      def init?
+        @init.nil? ? false : @init
       end
 
       def required?
@@ -60,21 +80,38 @@ module Fluent
       end
 
       def final?
-        @final
+        !!@final
       end
 
       def merge(other) # self is base class, other is subclass
         return merge_for_finalized(other) if self.final?
 
-        options = {
-          param_name: other.param_name,
-          required: (other.required.nil? ? self.required : other.required),
-          multi: (other.multi.nil? ? self.multi : other.multi)
-        }
-        merged = self.class.new(other.name, options)
+        [:param_name, :required, :multi, :alias, :configured_in_section].each do |prohibited_name|
+          if overwrite?(other, prohibited_name)
+            raise ConfigError, "BUG: subclass cannot overwrite base class's config_section: #{prohibited_name}"
+          end
+        end
+
+        options = {}
+        # param_name affects instance variable name, which is just "internal" of each plugins.
+        # so it must not be changed. base class's name (or param_name) is always used.
+        options[:param_name] = @param_name
+
+        # subclass cannot overwrite base class's definition
+        options[:init] = @init.nil? ? other.init : self.init
+        options[:required] = @required.nil? ? other.required : self.required
+        options[:multi] = @multi.nil? ? other.multi : self.multi
+        options[:alias] = @alias.nil? ? other.alias : self.alias
+        options[:final] = @final || other.final
+        options[:type_lookup] = @type_lookup
+
+        merged = self.class.new(@name, options)
+
+        # configured_in MUST be kept
+        merged.configured_in_section = self.configured_in_section
 
         merged.argument = other.argument || self.argument
-        merged.params = self.params.merge(other.params)
+        merged.params = other.params.merge(self.params)
         merged.defaults = self.defaults.merge(other.defaults)
         merged.sections = {}
         (self.sections.keys + other.sections.keys).uniq.each do |section_key|
@@ -95,20 +132,36 @@ module Fluent
 
       def merge_for_finalized(other)
         # list what subclass can do for finalized section
-        #  * overwrite param_name to escape duplicated name of instance variable
         #  * append params/defaults/sections which are missing in superclass
+        #  * change default values of superclass
+        #  * overwrite init to make it enable to instantiate section objects with added default values
 
-        options = {
-          param_name: other.param_name,
-          required: (self.required.nil? ? other.required : self.required),
-          multi: (self.multi.nil? ? other.multi : self.multi),
-          final: true,
-        }
-        merged = self.class.new(other.name, options)
+        if other.final == false && overwrite?(other, :final)
+          raise ConfigError, "BUG: subclass cannot overwrite finalized base class's config_section"
+        end
+
+        [:param_name, :required, :multi, :alias, :configured_in_section].each do |prohibited_name|
+          if overwrite?(other, prohibited_name)
+            raise ConfigError, "BUG: subclass cannot overwrite base class's config_section: #{prohibited_name}"
+          end
+        end
+
+        options = {}
+        options[:param_name] = @param_name
+        options[:init] = @init || other.init
+        options[:required] = @required.nil? ? other.required : self.required
+        options[:multi] = @multi.nil? ? other.multi : self.multi
+        options[:alias] = @alias.nil? ? other.alias : self.alias
+        options[:final]  = true
+        options[:type_lookup] = @type_lookup
+
+        merged = self.class.new(@name, options)
+
+        merged.configured_in_section = self.configured_in_section
 
         merged.argument = self.argument || other.argument
         merged.params = other.params.merge(self.params)
-        merged.defaults = other.defaults.merge(self.defaults)
+        merged.defaults = self.defaults.merge(other.defaults)
         merged.sections = {}
         (self.sections.keys + other.sections.keys).uniq.each do |section_key|
           self_section = self.sections[section_key]
@@ -126,28 +179,29 @@ module Fluent
         merged
       end
 
-      def parameter_configuration(name, *args, &block)
+      def overwrite_defaults(other) # other is owner plugin's corresponding proxy
+        self.defaults = self.defaults.merge(other.defaults)
+        self.sections.keys.each do |section_key|
+          if other.sections.has_key?(section_key)
+            self.sections[section_key].overwrite_defaults(other.sections[section_key])
+          end
+        end
+      end
+
+      def parameter_configuration(name, type = nil, **kwargs, &block)
         name = name.to_sym
 
         opts = {}
-        args.each { |a|
-          if a.is_a?(Symbol)
-            opts[:type] = a
-          elsif a.is_a?(Hash)
-            opts.merge!(a)
-          else
-            raise ArgumentError, "#{self.name}: wrong number of arguments (#{1 + args.length} for #{block ? 2 : 3})"
-          end
-        }
+        opts[:type] = type
+        opts.merge!(kwargs)
 
-        type = opts[:type]
         if block && type
           raise ArgumentError, "#{self.name}: both of block and type cannot be specified"
         end
 
         begin
           type = :string if type.nil?
-          block ||= Configurable.lookup_type(type)
+          block ||= @type_lookup.call(type)
         rescue ConfigError
           # override error message
           raise ArgumentError, "#{self.name}: unknown config_argument type `#{type}'"
@@ -157,21 +211,37 @@ module Fluent
           config_set_default(name, opts[:default])
         end
 
+        if opts.has_key?(:desc)
+          config_set_desc(name, opts[:desc])
+        end
+
         [name, block, opts]
       end
 
-      def config_argument(name, *args, &block)
+      def configured_in(section_name)
+        if @configured_in_section
+          raise ArgumentError, "#{self.name}: configured_in called twice"
+        end
+        @configured_in_section = section_name.to_sym
+      end
+
+      def config_argument(name, type = nil, **kwargs, &block)
         if @argument
           raise ArgumentError, "#{self.name}: config_argument called twice"
         end
-        name, block, opts = parameter_configuration(name, *args, &block)
+        name, block, opts = parameter_configuration(name, type, **kwargs, &block)
 
         @argument = [name, block, opts]
         name
       end
 
-      def config_param(name, *args, &block)
-        name, block, opts = parameter_configuration(name, *args, &block)
+      def config_param(name, type = nil, **kwargs, &block)
+        name, block, opts = parameter_configuration(name, type, **kwargs, &block)
+
+        if @current_description
+          config_set_desc(name, @current_description)
+          @current_description = nil
+        end
 
         @sections.delete(name)
         @params[name] = [block, opts]
@@ -189,24 +259,65 @@ module Fluent
         nil
       end
 
-      def config_section(name, *args, &block)
+      def config_set_desc(name, description)
+        name = name.to_sym
+
+        if @descriptions.has_key?(name)
+          raise ArgumentError, "#{self.name}: description specified twice for #{name}"
+        end
+
+        @descriptions[name] = description
+        nil
+      end
+
+      def desc(description)
+        @current_description = description
+      end
+
+      def config_section(name, **kwargs, &block)
         unless block_given?
           raise ArgumentError, "#{self.name}: config_section requires block parameter"
         end
         name = name.to_sym
 
-        opts = {}
-        unless args.empty? || args.size == 1 && args.first.is_a?(Hash)
-          raise ArgumentError, "#{self.name}: unknown config_section arguments: #{args.inspect}"
-        end
-
-        sub_proxy = ConfigureProxy.new(name, *args)
+        sub_proxy = ConfigureProxy.new(name, type_lookup: @type_lookup, **kwargs)
         sub_proxy.instance_exec(&block)
+
+        if sub_proxy.init?
+          if sub_proxy.argument && !sub_proxy.defaults.has_key?(sub_proxy.argument.first)
+            raise ArgumentError, "#{self.name}: init is specified, but default value of argument is missing"
+          end
+          if sub_proxy.params.keys.any?{|param_name| !sub_proxy.defaults.has_key?(param_name)}
+            raise ArgumentError, "#{self.name}: init is specified, but there're parameters without default values"
+          end
+        end
 
         @params.delete(name)
         @sections[name] = sub_proxy
 
         name
+      end
+
+      def dump(level = 0)
+        dumped_config = ""
+        indent = " " * level
+        @params.each do |name, config|
+          dumped_config << "#{indent}#{name}: #{config[1][:type]}: <#{@defaults[name].inspect}>"
+          dumped_config << " # #{@descriptions[name]}" if @descriptions[name]
+          dumped_config << "\n"
+        end
+        @sections.each do |section_name, sub_proxy|
+          dumped_config << "#{indent}#{section_name}\n#{sub_proxy.dump(level + 1)}"
+        end
+        dumped_config
+      end
+
+      private
+
+      def overwrite?(other, attribute_name)
+        value = instance_variable_get("@#{attribute_name}")
+        other_value = other.__send__(attribute_name)
+        !value.nil? && !other_value.nil? && value != other_value
       end
     end
   end

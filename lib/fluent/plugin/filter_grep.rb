@@ -14,14 +14,22 @@
 #    limitations under the License.
 #
 
+require 'fluent/filter'
+require 'fluent/config/error'
+
 module Fluent
   class GrepFilter < Filter
     Fluent::Plugin.register_filter('grep', self)
 
+    def initialize
+      super
+      require 'fluent/plugin/string_util'
+    end
+
     REGEXP_MAX_NUM = 20
 
-    (1..REGEXP_MAX_NUM).each {|i| config_param :"regexp#{i}",  :string, :default => nil }
-    (1..REGEXP_MAX_NUM).each {|i| config_param :"exclude#{i}", :string, :default => nil }
+    (1..REGEXP_MAX_NUM).each {|i| config_param :"regexp#{i}",  :string, default: nil }
+    (1..REGEXP_MAX_NUM).each {|i| config_param :"exclude#{i}", :string, default: nil }
 
     # for test
     attr_reader :regexps
@@ -54,32 +62,18 @@ module Fluent
       begin
         catch(:break_loop) do
           @regexps.each do |key, regexp|
-            throw :break_loop unless match(regexp, record[key].to_s)
+            throw :break_loop unless ::Fluent::StringUtil.match_regexp(regexp, record[key].to_s)
           end
           @excludes.each do |key, exclude|
-            throw :break_loop if match(exclude, record[key].to_s)
+            throw :break_loop if ::Fluent::StringUtil.match_regexp(exclude, record[key].to_s)
           end
           result = record
         end
       rescue => e
-        log.warn "failed to grep events", :error_class => e.class, :error => e.message
+        log.warn "failed to grep events", error: e
         log.warn_backtrace
       end
       result
-    end
-
-    private
-
-    def match(regexp, string)
-      begin
-        return regexp.match(string)
-      rescue ArgumentError => e
-        raise e unless e.message.index("invalid byte sequence in".freeze).zero?
-        log.info "invalid byte sequence is replaced in `#{string}`"
-        string = string.scrub('?')
-        retry
-      end
-      return true
     end
   end
 end

@@ -1,7 +1,20 @@
 require_relative '../helper'
 require 'fluent/test'
+require 'fluent/plugin/in_syslog'
 
 class SyslogInputTest < Test::Unit::TestCase
+  class << self
+    def startup
+      socket_manager_path = ServerEngine::SocketManager::Server.generate_path
+      @server = ServerEngine::SocketManager::Server.open(socket_manager_path)
+      ENV['SERVERENGINE_SOCKETMANAGER_PATH'] = socket_manager_path.to_s
+    end
+
+    def shutdown
+      @server.close
+    end
+  end
+  
   def setup
     Fluent::Test.setup
     require 'fluent/plugin/socket_util'
@@ -43,8 +56,8 @@ class SyslogInputTest < Test::Unit::TestCase
       d = create_driver(v)
 
       tests = [
-        {'msg' => '<6>Sep 11 00:00:00 localhost logger: foo', 'expected' => Time.strptime('Sep 11 00:00:00', '%b %d %H:%M:%S').to_i},
-        {'msg' => '<6>Sep  1 00:00:00 localhost logger: foo', 'expected' => Time.strptime('Sep  1 00:00:00', '%b  %d %H:%M:%S').to_i},
+        {'msg' => '<6>Dec 11 00:00:00 localhost logger: foo', 'expected' => Fluent::EventTime.from_time(Time.strptime('Dec 11 00:00:00', '%b %d %H:%M:%S'))},
+        {'msg' => '<6>Dec  1 00:00:00 localhost logger: foo', 'expected' => Fluent::EventTime.from_time(Time.strptime('Dec  1 00:00:00', '%b  %d %H:%M:%S'))},
       ]
 
       d.run do
@@ -58,7 +71,7 @@ class SyslogInputTest < Test::Unit::TestCase
 
       emits = d.emits
       emits.each_index {|i|
-        assert_equal(tests[i]['expected'], emits[i][1])
+        assert_equal_event_time(tests[i]['expected'], emits[i][1])
       }
     }
   end

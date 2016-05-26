@@ -14,6 +14,14 @@
 #    limitations under the License.
 #
 
+require 'strptime'
+require 'yajl'
+
+require 'fluent/input'
+require 'fluent/time'
+require 'fluent/timezone'
+require 'fluent/config/error'
+
 module Fluent
   class ExecInput < Input
     Plugin.register_input('exec', self)
@@ -21,36 +29,33 @@ module Fluent
     def initialize
       super
       require 'fluent/plugin/exec_util'
-      require 'fluent/timezone'
     end
 
-    SUPPORTED_FORMAT = {
-      'tsv' => :tsv,
-      'json' => :json,
-      'msgpack' => :msgpack,
-    }
-
+    desc 'The command (program) to execute.'
     config_param :command, :string
-    config_param :format, :default => :tsv do |val|
-      f = SUPPORTED_FORMAT[val]
-      raise ConfigError, "Unsupported format '#{val}'" unless f
-      f
-    end
-    config_param :keys, :default => [] do |val|
+    desc 'The format used to map the program output to the incoming event.(tsv,json,msgpack)'
+    config_param :format, :string, default: 'tsv'
+    desc 'Specify the comma-separated keys when using the tsv format.'
+    config_param :keys, default: [] do |val|
       val.split(',')
     end
-    config_param :tag, :string, :default => nil
-    config_param :tag_key, :string, :default => nil
-    config_param :time_key, :string, :default => nil
-    config_param :time_format, :string, :default => nil
-    config_param :run_interval, :time, :default => nil
+    desc 'Tag of the output events.'
+    config_param :tag, :string, default: nil
+    desc 'The key to use as the event tag instead of the value in the event record. '
+    config_param :tag_key, :string, default: nil
+    desc 'The key to use as the event time instead of the value in the event record.'
+    config_param :time_key, :string, default: nil
+    desc 'The format of the event time used for the time_key parameter.'
+    config_param :time_format, :string, default: nil
+    desc 'The interval time between periodic program runs.'
+    config_param :run_interval, :time, default: nil
 
     def configure(conf)
       super
 
-      if localtime = conf['localtime']
+      if conf['localtime']
         @localtime = true
-      elsif utc = conf['utc']
+      elsif conf['utc']
         @localtime = false
       end
 
@@ -66,26 +71,40 @@ module Fluent
       if @time_key
         if @time_format
           f = @time_format
-          @time_parse_proc = Proc.new {|str| Time.strptime(str, f).to_i }
+          @time_parse_proc =
+            begin
+              strptime = Strptime.new(f)
+              Proc.new { |str| Fluent::EventTime.from_time(strptime.exec(str)) }
+            rescue
+              Proc.new {|str| Fluent::EventTime.from_time(Time.strptime(str, f)) }
+            end
         else
-          @time_parse_proc = Proc.new {|str| str.to_i }
+          @time_parse_proc = Proc.new {|str| Fluent::EventTime.from_time(Time.at(str.to_f)) }
         end
       end
 
+      @parser = setup_parser(conf)
+    end
+
+    def setup_parser(conf)
       case @format
-      when :tsv
+      when 'tsv'
         if @keys.empty?
           raise ConfigError, "keys option is required on exec input for tsv format"
         end
-        @parser = ExecUtil::TSVParser.new(@keys, method(:on_message))
-      when :json
-        @parser = ExecUtil::JSONParser.new(method(:on_message))
-      when :msgpack
-        @parser = ExecUtil::MessagePackParser.new(method(:on_message))
+        ExecUtil::TSVParser.new(@keys, method(:on_message))
+      when 'json'
+        ExecUtil::JSONParser.new(method(:on_message))
+      when 'msgpack'
+        ExecUtil::MessagePackParser.new(method(:on_message))
+      else
+        ExecUtil::TextParserWrapperParser.new(conf, method(:on_message))
       end
     end
 
     def start
+      super
+
       if @run_interval
         @finished = false
         @thread = Thread.new(&method(:run_periodic))
@@ -99,6 +118,8 @@ module Fluent
     def shutdown
       if @run_interval
         @finished = true
+        # call Thread#run which interupts sleep in order to stop run_periodic thread immediately.
+        @thread.run
         @thread.join
       else
         begin
@@ -115,6 +136,8 @@ module Fluent
         end
         @thread.join
       end
+
+      super
     end
 
     def run
@@ -122,14 +145,15 @@ module Fluent
     end
 
     def run_periodic
+      sleep @run_interval
       until @finished
         begin
-          sleep @run_interval
           io = IO.popen(@command, "r")
           @parser.call(io)
           Process.waitpid(io.pid)
+          sleep @run_interval
         rescue
-          log.error "exec failed to run or shutdown child process", :error => $!.to_s, :error_class => $!.class.to_s
+          log.error "exec failed to run or shutdown child process", error: $!
           log.warn_backtrace $!.backtrace
         end
       end
@@ -137,22 +161,26 @@ module Fluent
 
     private
 
-    def on_message(record)
+    def on_message(record, parsed_time = nil)
       if val = record.delete(@tag_key)
         tag = val
       else
         tag = @tag
       end
 
-      if val = record.delete(@time_key)
-        time = @time_parse_proc.call(val)
+      if parsed_time
+        time = parsed_time
       else
-        time = Engine.now
+        if val = record.delete(@time_key)
+          time = @time_parse_proc.call(val)
+        else
+          time = Engine.now
+        end
       end
 
       router.emit(tag, time, record)
     rescue => e
-      log.error "exec failed to emit", :error => e.to_s, :error_class => e.class.to_s, :tag => tag, :record => Yajl.dump(record)
+      log.error "exec failed to emit", error: e, tag: tag, record: Yajl.dump(record)
     end
   end
 end

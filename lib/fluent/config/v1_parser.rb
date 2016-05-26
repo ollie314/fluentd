@@ -14,14 +14,16 @@
 #    limitations under the License.
 #
 
+require 'strscan'
+require 'uri'
+
+require 'fluent/config/error'
+require 'fluent/config/basic_parser'
+require 'fluent/config/literal_parser'
+require 'fluent/config/element'
+
 module Fluent
   module Config
-
-    require 'strscan'
-    require 'fluent/config/error'
-    require 'fluent/config/literal_parser'
-    require 'fluent/config/element'
-
     class V1Parser < LiteralParser
       ELEMENT_NAME = /[a-zA-Z0-9_]+/
 
@@ -51,7 +53,7 @@ module Fluent
       end
 
       ELEM_SYMBOLS = ['match', 'source', 'filter', 'system']
-      RESERVED_PARAMS = %W(@type @id @label)
+      RESERVED_PARAMS = %W(@type @id @label @log_level)
 
       def parse_element(root_element, elem_name, attrs = {}, elems = [])
         while true
@@ -154,10 +156,10 @@ module Fluent
             pattern = path
           end
 
-          Dir.glob(pattern).sort.each { |path|
-            basepath = File.dirname(path)
-            fname = File.basename(path)
-            data = File.read(path)
+          Dir.glob(pattern).sort.each { |entry|
+            basepath = File.dirname(entry)
+            fname = File.basename(entry)
+            data = File.read(entry)
             data.force_encoding('UTF-8')
             ss = StringScanner.new(data)
             V1Parser.new(ss, basepath, fname, @eval_context).parse_element(true, nil, attrs, elems)

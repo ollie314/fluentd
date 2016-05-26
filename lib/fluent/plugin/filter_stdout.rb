@@ -14,6 +14,9 @@
 #    limitations under the License.
 #
 
+require 'fluent/filter'
+require 'fluent/plugin'
+
 module Fluent
   class StdoutFilter < Filter
     Plugin.register_filter('stdout', self)
@@ -21,7 +24,8 @@ module Fluent
     # for tests
     attr_reader :formatter
 
-    config_param :format, :string, :default => 'stdout'
+    desc 'The format of the output.'
+    config_param :format, :string, default: 'stdout'
     # config_param :output_type, :string, :default => 'json' (StdoutFormatter defines this)
 
     def configure(conf)

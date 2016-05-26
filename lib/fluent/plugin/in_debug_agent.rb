@@ -14,6 +14,8 @@
 #    limitations under the License.
 #
 
+require 'fluent/input'
+
 module Fluent
   class DebugAgentInput < Input
     Plugin.register_input('debug_agent', self)
@@ -24,11 +26,11 @@ module Fluent
       super
     end
 
-    config_param :bind, :string, :default => '0.0.0.0'
-    config_param :port, :integer, :default => 24230
-    config_param :unix_path, :string, :default => nil
+    config_param :bind, :string, default: '0.0.0.0'
+    config_param :port, :integer, default: 24230
+    config_param :unix_path, :string, default: nil
     #config_param :unix_mode  # TODO
-    config_param :object, :string, :default => 'Engine'
+    config_param :object, :string, default: 'Engine'
 
     def configure(conf)
       super
@@ -40,19 +42,23 @@ module Fluent
     end
 
     def start
+      super
+
       if @unix_path
         require 'drb/unix'
         uri = "drbunix:#{@unix_path}"
       else
         uri = "druby://#{@bind}:#{@port}"
       end
-      log.info "listening dRuby", :uri => uri, :object => @object
+      log.info "listening dRuby", uri: uri, object: @object
       obj = eval(@object)
       @server = DRb::DRbServer.new(uri, obj)
     end
 
     def shutdown
       @server.stop_service if @server
+
+      super
     end
   end
 end

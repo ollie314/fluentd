@@ -14,6 +14,8 @@
 #    limitations under the License.
 #
 
+require 'cool.io'
+
 require 'fluent/plugin/socket_util'
 
 module Fluent
@@ -21,11 +23,19 @@ module Fluent
     Plugin.register_input('tcp', self)
 
     config_set_default :port, 5170
-    config_param :delimiter, :string, :default => "\n" # syslog family add "\n" to each message and this seems only way to split messages in tcp stream
+    desc 'The payload is read up to this character.'
+    config_param :delimiter, :string, default: "\n" # syslog family add "\n" to each message and this seems only way to split messages in tcp stream
 
     def listen(callback)
-      log.debug "listening tcp socket on #{@bind}:#{@port}"
-      Coolio::TCPServer.new(@bind, @port, SocketUtil::TcpHandler, log, @delimiter, callback)
+      log.info "listening tcp socket on #{@bind}:#{@port}"
+
+      socket_manager_path = ENV['SERVERENGINE_SOCKETMANAGER_PATH']
+      if Fluent.windows?
+        socket_manager_path = socket_manager_path.to_i
+      end
+      client = ServerEngine::SocketManager::Client.new(socket_manager_path)
+      lsock = client.listen_tcp(@bind, @port)
+      Coolio::TCPServer.new(lsock, nil, SocketUtil::TcpHandler, log, @delimiter, callback)
     end
   end
 end

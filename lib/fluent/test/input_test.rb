@@ -14,23 +14,21 @@
 #    limitations under the License.
 #
 
-module Fluent
-  class FileBuffer < BasicBuffer
-    def self.clear_buffer_paths
-      @@buffer_paths = {}
-    end
-  end
+require 'fluent/engine'
+require 'fluent/time'
+require 'fluent/test/base'
 
+module Fluent
   module Test
     class InputTestDriver < TestDriver
       def initialize(klass, &block)
-        FileBuffer.clear_buffer_paths
         super(klass, &block)
         @emit_streams = []
         @expects = nil
         # for checking only the number of emitted records during run
         @expected_emits_length = nil
         @run_timeout = 5
+        @run_post_conditions = []
       end
 
       def expect_emit(tag, time, record)
@@ -76,7 +74,6 @@ module Fluent
 
       def register_run_post_condition(&block)
         if block
-          @run_post_conditions ||= []
           @run_post_conditions << block
         end
       end
@@ -102,15 +99,27 @@ module Fluent
         false
       end
 
-      def run(&block)
+      module EmitStreamWrapper
+        def emit_stream_callee=(method)
+          @emit_stream_callee = method
+        end
+        def emit_stream(tag, es)
+          @emit_stream_callee.call(tag, es)
+        end
+      end
+
+      def run(num_waits = 10, &block)
         m = method(:emit_stream)
-        Engine.define_singleton_method(:emit_stream) {|tag,es|
-          m.call(tag, es)
-        }
-        instance.router.define_singleton_method(:emit_stream) {|tag,es|
-          m.call(tag, es)
-        }
-        super {
+        (class << Engine; self; end).module_eval do
+          prepend EmitStreamWrapper
+        end
+        Engine.emit_stream_callee = m
+        (class << instance.router; self; end).module_eval do
+          prepend EmitStreamWrapper
+        end
+        instance.router.emit_stream_callee = m
+
+        super(num_waits) {
           block.call if block
 
           if @expected_emits_length || @expects || @run_post_conditions
@@ -140,7 +149,10 @@ module Fluent
 
               tag, events = @emit_streams[j]
               events.each do |time, record|
-                assert_equal(@expects[i], [tag, time, record]) if @expects
+                if @expects
+                  assert_equal(@expects[i], [tag, time, record])
+                  assert_equal_event_time(@expects[i][1], time) if @expects[i][1].is_a?(Fluent::EventTime)
+                end
                 i += 1
               end
               j += 1

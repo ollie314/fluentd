@@ -58,7 +58,7 @@ class RecordTransformerFilterTest < Test::Unit::TestCase
     test 'typical usage' do
       msgs = ['1', '2']
       es = emit(CONFIG, msgs)
-      es.each_with_index do |(t, r), i|
+      es.each_with_index do |(_t, r), i|
         assert_equal('bar', r['foo'])
         assert_equal(@hostname, r['hostname'])
         assert_equal(@tag, r['tag'])
@@ -70,7 +70,7 @@ class RecordTransformerFilterTest < Test::Unit::TestCase
     test 'remove_keys' do
       config = CONFIG + %[remove_keys foo,message]
       es = emit(config)
-      es.each_with_index do |(t, r), i|
+      es.each_with_index do |(_t, r), i|
         assert_not_include(r, 'foo')
         assert_equal(@hostname, r['hostname'])
         assert_equal(@tag, r['tag'])
@@ -83,7 +83,7 @@ class RecordTransformerFilterTest < Test::Unit::TestCase
       config = CONFIG + %[renew_record true]
       msgs = ['1', '2']
       es = emit(config, msgs)
-      es.each_with_index do |(t, r), i|
+      es.each_with_index do |(_t, r), i|
         assert_not_include(r, 'foo')
         assert_equal(@hostname, r['hostname'])
         assert_equal(@tag, r['tag'])
@@ -95,10 +95,11 @@ class RecordTransformerFilterTest < Test::Unit::TestCase
     test 'renew_time_key' do
       config = %[renew_time_key message]
       times = [ Time.local(2,2,3,4,5,2010,nil,nil,nil,nil), Time.local(3,2,3,4,5,2010,nil,nil,nil,nil) ]
-      msgs = times.map{|t| t.to_i.to_s }
+      msgs = times.map{|t| t.to_f.to_s }
       es = emit(config, msgs)
-      es.each_with_index do |(time, record), i|
+      es.each_with_index do |(time, _record), i|
         assert_equal(times[i].to_i, time)
+        assert(time.is_a?(Fluent::EventTime))
       end
     end
 
@@ -106,7 +107,7 @@ class RecordTransformerFilterTest < Test::Unit::TestCase
       config = %[renew_record true\nkeep_keys foo,message]
       msgs = ['1', '2']
       es = emit(config, msgs)
-      es.each_with_index do |(t, r), i|
+      es.each_with_index do |(_t, r), i|
         assert_equal('bar', r['foo'])
         assert_equal(msgs[i], r['message'])
       end
@@ -116,13 +117,13 @@ class RecordTransformerFilterTest < Test::Unit::TestCase
       config = %[
         enable_ruby yes
         <record>
-          message ${hostname} ${tag_parts.last} ${URI.encode(message)}
+          message ${hostname} ${tag_parts.last} ${"'" + message + "'"}
         </record>
       ]
       msgs = ['1', '2']
       es = emit(config, msgs)
-      es.each_with_index do |(t, r), i|
-        assert_equal("#{@hostname} #{@tag_parts[-1]} #{msgs[i]}", r['message'])
+      es.each_with_index do |(_t, r), i|
+        assert_equal("#{@hostname} #{@tag_parts[-1]} '#{msgs[i]}'", r['message'])
       end
     end
 
@@ -134,7 +135,7 @@ class RecordTransformerFilterTest < Test::Unit::TestCase
       %]
       msgs = ['1', '2']
       es = emit(config, msgs)
-      es.each_with_index do |(t, r), i|
+      es.each_with_index do |(_t, r), i|
         assert_equal({"k1"=>100, "k2"=>"foobar"}, r['hash_field'])
       end
     end
@@ -147,7 +148,7 @@ class RecordTransformerFilterTest < Test::Unit::TestCase
       %]
       msgs = ['1', '2']
       es = emit(config, msgs)
-      es.each_with_index do |(t, r), i|
+      es.each_with_index do |(_t, r), i|
         assert_equal([1,2,3], r['array_field'])
       end
     end
@@ -160,7 +161,7 @@ class RecordTransformerFilterTest < Test::Unit::TestCase
       %]
       msgs = ['1', '2']
       es = emit(config, msgs)
-      es.each_with_index do |(t, r), i|
+      es.each_with_index do |(_t, r), i|
         assert_equal({"hello"=>[1,2,3], "world"=>{"foo"=>"bar"}}, r['mixed_field'])
       end
     end
@@ -172,7 +173,12 @@ class RecordTransformerFilterTest < Test::Unit::TestCase
       yield d if block_given?
       d.run {
         msgs.each do |msg|
-          d.emit({'eventType0' => 'bar', 'message' => msg}, @time)
+          record = {
+            'eventType0' => 'bar',
+            'message'    => msg,
+          }
+          record = record.merge(msg) if msg.is_a?(Hash)
+          d.emit(record, @time)
         end
       }.filtered
     end
@@ -257,7 +263,7 @@ class RecordTransformerFilterTest < Test::Unit::TestCase
         ]
         msgs = ['1', '2']
         es = emit(config, msgs)
-        es.each_with_index do |(t, r), i|
+        es.each_with_index do |(_t, r), i|
           assert_not_include(r, 'eventType0')
           assert_equal("bar", r['eventtype'])
           assert_equal("bar #{msgs[i]}", r['message'])
@@ -277,7 +283,7 @@ class RecordTransformerFilterTest < Test::Unit::TestCase
         ]
         msgs = ['1', '2']
         es = emit(config, msgs)
-        es.each_with_index do |(t, r), i|
+        es.each_with_index do |(_t, r), i|
           assert_equal({"hostname" => @hostname, "tag" => @tag, "#{@tag}" => 100}, r['hash_field'])
         end
       end
@@ -291,7 +297,7 @@ class RecordTransformerFilterTest < Test::Unit::TestCase
         ]
         msgs = ['1', '2']
         es = emit(config, msgs)
-        es.each_with_index do |(t, r), i|
+        es.each_with_index do |(_t, r), i|
           assert_equal([@hostname, @tag], r['array_field'])
         end
       end
@@ -305,7 +311,7 @@ class RecordTransformerFilterTest < Test::Unit::TestCase
         ]
         msgs = ['1', '2']
         es = emit(config, msgs)
-        es.each_with_index do |(t, r), i|
+        es.each_with_index do |(_t, r), i|
           assert_equal([{"tag" => @tag}], r['mixed_field'])
         end
       end
@@ -321,8 +327,142 @@ class RecordTransformerFilterTest < Test::Unit::TestCase
         ]
         msgs = ['1', '2']
         es = emit(config, msgs)
-        es.each_with_index do |(t, r), i|
+        es.each_with_index do |(_t, r), i|
           assert_equal({@hostname=>'hostname',"foo.#{@tag}"=>'tag'}, r)
+        end
+      end
+
+      test "disabled typecasting of values with enable_ruby #{enable_ruby}" do
+        config = %[
+          auto_typecast false
+          enable_ruby #{enable_ruby}
+          <record>
+            single      ${source}
+            multiple    ${source}${source}
+            with_prefix prefix-${source}
+            with_suffix ${source}-suffix
+            with_quote  source[""]
+          </record>
+        ]
+        msgs = [
+          { "source" => "string" },
+          { "source" => 123 },
+          { "source" => [1, 2] },
+          { "source" => {a:1, b:2} },
+          { "source" => nil },
+        ]
+        expected_results = [
+          { single: "string",
+            multiple: "stringstring",
+            with_prefix: "prefix-string",
+            with_suffix: "string-suffix",
+            with_quote: %Q{source[""]} },
+          { single: 123.to_s,
+            multiple: "#{123.to_s}#{123.to_s}",
+            with_prefix: "prefix-#{123.to_s}",
+            with_suffix: "#{123.to_s}-suffix",
+            with_quote: %Q{source[""]} },
+          { single: [1, 2].to_s,
+            multiple: "#{[1, 2].to_s}#{[1, 2].to_s}",
+            with_prefix: "prefix-#{[1, 2].to_s}",
+            with_suffix: "#{[1, 2].to_s}-suffix",
+            with_quote: %Q{source[""]} },
+          { single: {a:1, b:2}.to_s,
+            multiple: "#{{a:1, b:2}.to_s}#{{a:1, b:2}.to_s}",
+            with_prefix: "prefix-#{{a:1, b:2}.to_s}",
+            with_suffix: "#{{a:1, b:2}.to_s}-suffix",
+            with_quote: %Q{source[""]} },
+          { single: nil.to_s,
+            multiple: "#{nil.to_s}#{nil.to_s}",
+            with_prefix: "prefix-#{nil.to_s}",
+            with_suffix: "#{nil.to_s}-suffix",
+            with_quote: %Q{source[""]} },
+        ]
+        actual_results = []
+        es = emit(config, msgs)
+        es.each_with_index do |(_t, r), i|
+          actual_results << {
+            single: r["single"],
+            multiple: r["multiple"],
+            with_prefix: r["with_prefix"],
+            with_suffix: r["with_suffix"],
+            with_quote: r["with_quote"],
+          }
+        end
+        assert_equal(expected_results, actual_results)
+      end
+
+      test "enabled typecasting of values with enable_ruby #{enable_ruby}" do
+        config = %[
+          auto_typecast yes
+          enable_ruby #{enable_ruby}
+          <record>
+            single      ${source}
+            multiple    ${source}${source}
+            with_prefix prefix-${source}
+            with_suffix ${source}-suffix
+          </record>
+        ]
+        msgs = [
+          { "source" => "string" },
+          { "source" => 123 },
+          { "source" => [1, 2] },
+          { "source" => {a:1, b:2} },
+          { "source" => nil },
+        ]
+        expected_results = [
+          { single: "string",
+            multiple: "stringstring",
+            with_prefix: "prefix-string",
+            with_suffix: "string-suffix" },
+          { single: 123,
+            multiple: "#{123.to_s}#{123.to_s}",
+            with_prefix: "prefix-#{123.to_s}",
+            with_suffix: "#{123.to_s}-suffix" },
+          { single: [1, 2],
+            multiple: "#{[1, 2].to_s}#{[1, 2].to_s}",
+            with_prefix: "prefix-#{[1, 2].to_s}",
+            with_suffix: "#{[1, 2].to_s}-suffix" },
+          { single: {a:1, b:2},
+            multiple: "#{{a:1, b:2}.to_s}#{{a:1, b:2}.to_s}",
+            with_prefix: "prefix-#{{a:1, b:2}.to_s}",
+            with_suffix: "#{{a:1, b:2}.to_s}-suffix" },
+          { single: nil,
+            multiple: "#{nil.to_s}#{nil.to_s}",
+            with_prefix: "prefix-#{nil.to_s}",
+            with_suffix: "#{nil.to_s}-suffix" },
+        ]
+        actual_results = []
+        es = emit(config, msgs)
+        es.each_with_index do |(_t, r), i|
+          actual_results << {
+            single: r["single"],
+            multiple: r["multiple"],
+            with_prefix: r["with_prefix"],
+            with_suffix: r["with_suffix"],
+          }
+        end
+        assert_equal(expected_results, actual_results)
+      end
+
+      test %Q[record["key"] with enable_ruby #{enable_ruby}] do
+        config = %[
+          enable_ruby #{enable_ruby}
+          auto_typecast yes
+          <record>
+            _timestamp ${record["@timestamp"]}
+            _foo_bar   ${record["foo.bar"]}
+          </record>
+        ]
+        d = create_driver(config)
+        record = {
+          "foo.bar"    => "foo.bar",
+          "@timestamp" => 10,
+        }
+        es = d.run { d.emit(record, @time) }.filtered
+        es.each do |t, r|
+          assert { r['_timestamp'] == record['@timestamp'] }
+          assert { r['_foo_bar'] == record['foo.bar'] }
         end
       end
     end
@@ -347,7 +487,7 @@ class RecordTransformerFilterTest < Test::Unit::TestCase
         </record>
       ]
       es = emit(config) { |d|
-        mock(d.instance.log).warn("failed to expand `${unknown['bar']}`", anything)
+        mock(d.instance.log).warn("failed to expand `%Q[\#{unknown['bar']}]`", anything)
       }
       es.each do |t, r|
         assert_nil(r['message'])
@@ -369,6 +509,23 @@ class RecordTransformerFilterTest < Test::Unit::TestCase
       end
     end
 
+    test 'auto_typecast placeholder containing {} (enable_ruby yes)' do
+      config = %[
+        tag tag
+        enable_ruby yes
+        auto_typecast yes
+        <record>
+          foo ${record.map{|k,v|v}}
+        </record>
+      ]
+      d = create_driver(config)
+      message = {"@timestamp" => "foo"}
+      es = d.run { d.emit(message, @time) }.filtered
+      es.each do |t, r|
+        assert_equal([message["@timestamp"]], r['foo'])
+      end
+    end
+
     test 'expand fields starting with @ (enable_ruby yes)' do
       config = %[
         enable_ruby yes
@@ -382,6 +539,38 @@ class RecordTransformerFilterTest < Test::Unit::TestCase
       es.each do |t, r|
         assert_equal(message["@timestamp"], r['foo'])
       end
+    end
+  end # test placeholders
+
+  test "compatibility test (enable_ruby yes)" do
+    config = %[
+      enable_ruby yes
+      auto_typecast yes
+      <record>
+        _message   prefix-${message}-suffix
+        _time      ${Time.at(time)}
+        _number    ${number == '-' ? 0 : number}
+        _match     ${/0x[0-9a-f]+/.match(hex)[0]}
+        _timestamp ${__send__("@timestamp")}
+        _foo_bar   ${__send__('foo.bar')}
+      </record>
+    ]
+    d = create_driver(config)
+    record = {
+      "number"     => "-",
+      "hex"        => "0x10",
+      "foo.bar"    => "foo.bar",
+      "@timestamp" => 10,
+      "message"    => "10",
+    }
+    es = d.run { d.emit(record, @time) }.filtered
+    es.each do |t, r|
+      assert { r['_message'] == "prefix-#{record['message']}-suffix" }
+      assert { r['_time'] == Time.at(@time) }
+      assert { r['_number'] == 0 }
+      assert { r['_match'] == record['hex'] }
+      assert { r['_timestamp'] == record['@timestamp'] }
+      assert { r['_foo_bar'] == record['foo.bar'] }
     end
   end
 end

@@ -15,34 +15,25 @@
 #
 
 module Fluent
-  class StatusClass
-    def initialize
-      @entries = {}
-      @mutex = Mutex.new
+  module UniqueId
+    def self.generate
+      now = Time.now.utc
+      u1 = ((now.to_i * 1000 * 1000 + now.usec) << 12 | rand(0xfff))
+      [u1 >> 32, u1 & 0xffffffff, rand(0xffffffff), rand(0xffffffff)].pack('NNNN')
     end
 
-    def register(instance, name, &block)
-      @mutex.synchronize {
-        (@entries[instance.object_id] ||= {})[name] = block
-      }
-      nil
+    def self.hex(unique_id)
+      unique_id.unpack('H*').first
     end
 
-    def each(&block)
-      @mutex.synchronize {
-        @entries.each {|obj_id,hash|
-          record = {}
-          hash.each_pair {|name,block|
-            record[name] = block.call
-          }
-          block.call(record)
-        }
-      }
+    module Mixin
+      def generate_unique_id
+        Fluent::UniqueId.generate
+      end
+
+      def dump_unique_id_hex(unique_id)
+        Fluent::UniqueId.hex(unique_id)
+      end
     end
   end
-
-  # Don't use this class from plugins.
-  # The interface may be changed
-  Status = StatusClass.new
 end
-

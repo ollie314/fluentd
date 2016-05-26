@@ -14,6 +14,12 @@
 #    limitations under the License.
 #
 
+require 'thread'
+
+require 'fluent/config'
+require 'fluent/engine'
+require 'fluent/event'
+
 module Fluent
   class DetachProcessManager
     require 'singleton'
@@ -36,7 +42,7 @@ module Fluent
 
     def fork(delegate_object)
       ipr, ipw = IO.pipe  # child Engine.emit_stream -> parent Engine.emit_stream
-      opr, opw = IO.pipe  # parent target.emit -> child target.emit
+      opr, opw = IO.pipe  # parent target.emit_events -> child target.emit_events
 
       pid = Process.fork
       if pid
@@ -110,7 +116,7 @@ module Fluent
     end
 
     def process_parent(ipr, opw, pid, delegate_object)
-      child_uri = read_header(ipr)
+      # child_uri = read_header(ipr)
 
       # read event stream from the pipe and forward to Engine.emit_stream
       forward_thread = Thread.new(ipr, pid, &method(:input_forward_main))
@@ -147,14 +153,14 @@ module Fluent
       read_event_stream(opr) {|tag,es|
         # FIXME error handling
         begin
-          target.emit(tag, es, NullOutputChain.instance)
+          target.emit_events(tag, es)
         rescue
-          $log.warn "failed to emit", :error=>$!.to_s, :pid=>Process.pid
+          $log.warn "failed to emit", error: $!.to_s, pid: Process.pid
           $log.warn_backtrace
         end
       }
     rescue
-      $log.error "error on output process forwarding thread", :error=>$!.to_s, :pid=>Process.pid
+      $log.error "error on output process forwarding thread", error: $!.to_s, pid: Process.pid
       $log.error_backtrace
       raise
     end
@@ -165,18 +171,18 @@ module Fluent
         begin
           Engine.emit_stream(tag, es)
         rescue
-          $log.warn "failed to emit", :error=>$!.to_s, :pid=>Process.pid
+          $log.warn "failed to emit", error: $!.to_s, pid: Process.pid
           $log.warn_backtrace
         end
       }
     rescue
-      $log.error "error on input process forwarding thread", :error=>$!.to_s, :pid=>Process.pid
+      $log.error "error on input process forwarding thread", error: $!.to_s, pid: Process.pid
       $log.error_backtrace
       raise
     end
 
     def read_event_stream(r, &block)
-      u = MessagePack::Unpacker.new(r)
+      u = Fluent::Engine.msgpack_factory.unpacker(r)
       begin
         #buf = ''
         #map = {}
@@ -232,29 +238,39 @@ module Fluent
         @w = w
         @interval = interval
         @buffer = {}
+        @mutex = Mutex.new
         Thread.new(&method(:run))
       end
 
       def emit(tag, es)
-        if ms = @buffer[tag]
-          ms << es.to_msgpack_stream
-        else
-          @buffer[tag] = es.to_msgpack_stream
+        stream = es.to_msgpack_stream
+        @mutex.synchronize do
+          if @buffer[tag]
+            @buffer[tag] << stream
+          else
+            @buffer[tag] = stream
+          end
         end
       end
 
       def run
         while true
           sleep @interval
-          @buffer.keys.each {|tag|
-            if ms = @buffer.delete(tag)
-              [tag, ms].to_msgpack(@w)
-              #@w.write [tag, ms].to_msgpack
+
+          pairs = []
+          @mutex.synchronize do
+            @buffer.keys.each do |tag|
+              if ms = @buffer.delete(tag)
+                pairs << [tag, ms]
+              end
             end
-          }
+          end
+          pairs.each do |pair|
+            pair.to_msgpack(@w)
+          end
         end
       rescue
-        $log.error "error on forwerder thread", :error=>$!.to_s
+        $log.error "error on forwerder thread", error: $!.to_s
         $log.error_backtrace
         raise
       end
@@ -279,6 +295,9 @@ module Fluent
     def on_detach_process(i)
     end
 
+    def on_exit_process(i)
+    end
+
     private
 
     def detach_process_impl(num, &block)
@@ -289,7 +308,7 @@ module Fluent
 
         if pid
           # parent process
-          $log.info "detached process", :class=>self.class, :pid=>pid
+          $log.info "detached process", class: self.class, pid: pid
           children << [pid, forward_thread]
           next
         end
@@ -316,9 +335,10 @@ module Fluent
           #forward_thread.join  # TODO this thread won't stop because parent doesn't close pipe
           fin.wait
 
+          on_exit_process(i)
           exit! 0
         ensure
-          $log.error "unknown error while shutting down this child process", :error=>$!.to_s, :pid=>Process.pid
+          $log.error "unknown error while shutting down this child process", error: $!.to_s, pid: Process.pid
           $log.error_backtrace
         end
 
@@ -339,13 +359,13 @@ module Fluent
               pair[0] = nil
             end
           rescue
-            $log.error "unknown error while shutting down remote child process", :error=>$!.to_s
+            $log.error "unknown error while shutting down remote child process", error: $!.to_s
             $log.error_backtrace
           end
         }
       end
 
-      # override target.emit and write event stream to the pipe
+      # override target.emit_events and write event stream to the pipe
       forwarders = children.map {|pair| pair[1].forwarder }
       if forwarders.length > 1
         # use roundrobin
@@ -353,9 +373,8 @@ module Fluent
       else
         fwd = forwarders[0]
       end
-      define_singleton_method(:emit) do |tag,es,chain|
-        chain.next
-        fwd.emit(tag, es)
+      define_singleton_method(:emit_events) do |tag,es|
+        fwd.emit_events(tag, es)
       end
     end
 
@@ -397,6 +416,8 @@ module Fluent
 
     def configure(conf)
       super
+
+      @detach_process = nil
 
       if detach_process = conf['detach_process']
         b3v = Config.bool_value(detach_process)
@@ -440,6 +461,8 @@ module Fluent
 
     def configure(conf)
       super
+
+      @detach_process = nil
 
       if detach_process = conf['detach_process']
         b3v = Config.bool_value(detach_process)

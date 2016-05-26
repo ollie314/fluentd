@@ -53,9 +53,34 @@ module Fluent
       end
     end
 
-    def initialize(out=STDERR, level=LEVEL_TRACE, opts={})
-      @out = out
-      @level = level
+    def initialize(logger, opts={})
+      # overwrites logger.level= so that config reloading resets level of Fluentd::Log
+      orig_logger_level_setter = logger.class.public_instance_method(:level=).bind(logger)
+      me = self
+      # The original ruby logger sets the number as each log level like below.
+      # DEBUG = 0
+      # INFO  = 1
+      # WARN  = 2
+      # ERROR = 3
+      # FATAL = 4
+      # Serverengine use this original log number. In addition to this, serverengine sets -1 as TRACE level.
+      # TRACE = -1
+      #
+      # On the other hand, in fluentd side, it sets the number like below.
+      # TRACE = 0
+      # DEBUG = 1
+      # INFO  = 2
+      # WARN  = 3
+      # ERROR = 4
+      # FATAL = 5
+      #
+      # Then fluentd's level is set as serverengine's level + 1.
+      # So if serverengine's logger level is changed, fluentd's log level will be changed to that + 1.
+      logger.define_singleton_method(:level=) {|level| orig_logger_level_setter.call(level); me.level = self.level + 1 }
+
+      @logger = logger
+      @out = logger.instance_variable_get(:@logdev)
+      @level = logger.level + 1
       @debug_mode = false
       @self_event = false
       @tag = 'fluent'
@@ -65,15 +90,42 @@ module Fluent
       # TODO: This variable name is unclear so we should change to better name.
       @threads_exclude_events = []
 
-      if opts.has_key?(:suppress_repeated_stacktrace)
-        @suppress_repeated_stacktrace = opts[:suppress_repeated_stacktrace]
-      end
+      # Fluent::Engine requires Fluent::Log, so we must take that object lazily
+      @engine = Fluent.const_get('Engine')
+      @optional_header = nil
+      @optional_attrs = nil
+
+      @suppress_repeated_stacktrace = opts[:suppress_repeated_stacktrace]
+    end
+
+    def dup
+      dl_opts = {}
+      dl_opts[:log_level] = @level - 1
+      logger = ServerEngine::DaemonLogger.new(@out, dl_opts)
+      clone = self.class.new(logger, suppress_repeated_stacktrace: @suppress_repeated_stacktrace)
+      clone.tag = @tag
+      clone.time_format = @time_format
+      # optional headers/attrs are not copied, because new PluginLogger should have another one of it
+      clone
     end
 
     attr_accessor :out
     attr_accessor :level
     attr_accessor :tag
     attr_accessor :time_format
+    attr_accessor :optional_header, :optional_attrs
+
+    def logdev=(logdev)
+      @out = logdev
+      @logger.instance_variable_set(:@logdev, logdev)
+      nil
+    end
+
+    def reopen!
+      # do noting in @logger.reopen! because it's already reopened in Supervisor.load_config
+      @logger.reopen! if @logger
+      nil
+    end
 
     def enable_debug(b=true)
       @debug_mode = b
@@ -226,7 +278,7 @@ module Fluent
     end
 
     def puts(msg)
-      @out.puts(msg)
+      @logger << msg + "\n"
       @out.flush
       msg
     rescue
@@ -240,6 +292,10 @@ module Fluent
 
     def flush
       @out.flush
+    end
+
+    def reset
+      @out.reset if @out.respond_to?(:reset)
     end
 
     private
@@ -263,8 +319,8 @@ module Fluent
 
     def event(level, args)
       time = Time.now
-      message = ''
-      map = {}
+      message = @optional_header ? @optional_header.dup : ''
+      map = @optional_attrs ? @optional_attrs.dup : {}
       args.each {|a|
         if a.is_a?(Hash)
           a.each_pair {|k,v|
@@ -276,7 +332,11 @@ module Fluent
       }
 
       map.each_pair {|k,v|
-        message << " #{k}=#{v.inspect}"
+        if k == "error".freeze && v.is_a?(Exception) && !map.has_key?("error_class")
+          message << " error_class=#{v.class.to_s} error=#{v.to_s.inspect}"
+        else
+          message << " #{k}=#{v.inspect}"
+        end
       }
 
       unless @threads_exclude_events.include?(Thread.current)
@@ -285,7 +345,7 @@ module Fluent
           record[key] = record[key].inspect unless record[key].respond_to?(:to_msgpack)
         }
         record['message'] = message.dup
-        Engine.push_log_event("#{@tag}.#{level}", time.to_i, record)
+        @engine.push_log_event("#{@tag}.#{level}", time.to_i, record)
       end
 
       return time, message
@@ -317,7 +377,9 @@ module Fluent
       @logger = logger
       @level = @logger.level
       @depth_offset = 2
-      @suppress_repeated_stacktrace = logger.instance_variable_get(:@suppress_repeated_stacktrace)
+      if logger.instance_variable_defined?(:@suppress_repeated_stacktrace)
+        @suppress_repeated_stacktrace = logger.instance_variable_get(:@suppress_repeated_stacktrace)
+      end
 
       enable_color @logger.enable_color?
     end
@@ -336,14 +398,16 @@ module Fluent
     extend Forwardable
     def_delegators '@logger', :enable_color?, :enable_debug, :enable_event,
       :disable_events, :tag, :tag=, :time_format, :time_format=,
-      :event, :caller_line, :puts, :write, :flush, :out, :out=
+      :event, :caller_line, :puts, :write, :flush, :reset, :out, :out=,
+      :optional_header, :optional_header=, :optional_attrs, :optional_attrs=
   end
 
 
   module PluginLoggerMixin
     def self.included(klass)
       klass.instance_eval {
-        config_param :log_level, :string, :default => nil
+        desc 'Allows the user to set different levels of logging for each plugin.'
+        config_param :@log_level, :string, default: nil, alias: :log_level # 'log_level' will be warned as deprecated
       }
     end
 
@@ -358,12 +422,24 @@ module Fluent
     def configure(conf)
       super
 
-      if @log_level
+      if level = conf['@log_level']
         unless @log.is_a?(PluginLogger)
-          @log = PluginLogger.new($log)
+          @log = PluginLogger.new($log.dup)
         end
-        @log.level = @log_level
+        @log.level = level
+        @log.optional_header = "[#{self.class.name}#{plugin_id_configured? ? "(" + @id + ")" : ""}] "
+        @log.optional_attrs = {}
       end
+    end
+
+    def start
+      @log.reset
+      super
+    end
+
+    def terminate
+      super
+      @log.reset
     end
   end
 end

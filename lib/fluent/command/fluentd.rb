@@ -15,7 +15,13 @@
 #
 
 require 'optparse'
+
 require 'fluent/supervisor'
+require 'fluent/log'
+require 'fluent/env'
+require 'fluent/version'
+
+$fluentdargv = Marshal.load(Marshal.dump(ARGV))
 
 op = OptionParser.new
 op.version = Fluent::VERSION
@@ -32,6 +38,10 @@ op.on('-c', '--config PATH', "config file path (default: #{Fluent::DEFAULT_CONFI
 
 op.on('--dry-run', "Check fluentd setup is correct or not", TrueClass) {|b|
   opts[:dry_run] = b
+}
+
+op.on('--show-plugin-config=PLUGIN', "Show PLUGIN configuration and exit(ex: input:dummy)") {|plugin|
+  opts[:show_plugin_config] = plugin
 }
 
 op.on('-p', '--plugin DIR', "add plugin directory") {|s|
@@ -66,7 +76,7 @@ op.on('-o', '--log PATH', "log file path") {|s|
   opts[:log_path] = s
 }
 
-op.on('-i', '--inline-config CONFIG_STRING', "inline config which is appended to the config file on-fly") {|s|
+op.on('-i', '--inline-config CONFIG_STRING', "inline config which is appended to the config file on-the-fly") {|s|
   opts[:inline_config] = s
 }
 
@@ -115,7 +125,29 @@ op.on('-G', '--gem-path GEM_INSTALL_PATH', "Gemfile install path (default: $(dir
   opts[:gem_install_path] = s
 }
 
-(class<<self;self;end).module_eval do
+if Fluent.windows?
+  require 'windows/library'
+  include Windows::Library
+
+  op.on('-x', '--signame INTSIGNAME', "an object name which is used for Windows Service signal (Windows only)") {|s|
+    opts[:signame] = s
+  }
+
+  op.on('--reg-winsvc MODE', "install/uninstall as Windows Service. (i: install, u: uninstall) (Windows only)") {|s|
+    opts[:regwinsvc] = s
+  }
+
+  op.on('--[no-]reg-winsvc-auto-start', "Automatically start the Windows Service at boot. (only effective with '--reg-winsvc i') (Windows only)") {|s|
+    opts[:regwinsvcautostart] = s
+  }
+
+  op.on('--reg-winsvc-fluentdopt OPTION', "specify fluentd option paramters for Windows Service. (Windows only)") {|s|
+    opts[:fluentdopt] = s
+  }
+end
+
+
+(class << self; self; end).module_eval do
   define_method(:usage) do |msg|
     puts op.to_s
     puts "error: #{msg}" if msg
@@ -164,4 +196,73 @@ if setup_path = opts[:setup_path]
   exit 0
 end
 
-Fluent::Supervisor.new(opts).start
+early_exit = false
+start_service = false
+if winsvcinstmode = opts[:regwinsvc]
+  FLUENTD_WINSVC_NAME="fluentdwinsvc"
+  FLUENTD_WINSVC_DISPLAYNAME="Fluentd Windows Service"
+  FLUENTD_WINSVC_DESC="Fluentd is an event collector system."
+  require 'fileutils'
+  require "win32/service"
+  require "win32/registry"
+  include Win32
+
+  case winsvcinstmode
+  when 'i'
+    binary_path = File.join(File.dirname(__FILE__), "..")
+    ruby_path = "\0" * 256
+    GetModuleFileName.call(0,ruby_path,256)
+    ruby_path = ruby_path.rstrip.gsub(/\\/, '/')
+    start_type = Service::DEMAND_START
+    if opts[:regwinsvcautostart]
+      start_type = Service::AUTO_START
+      start_service = true
+    end
+
+    Service.create(
+      service_name: FLUENTD_WINSVC_NAME,
+      host: nil,
+      service_type: Service::WIN32_OWN_PROCESS,
+      description: FLUENTD_WINSVC_DESC,
+      start_type: start_type,
+      error_control: Service::ERROR_NORMAL,
+      binary_path_name: ruby_path+" -C "+binary_path+" winsvc.rb",
+      load_order_group: "",
+      dependencies: [""],
+      display_name: FLUENTD_WINSVC_DISPLAYNAME
+    )
+  when 'u'
+    if Service.status(FLUENTD_WINSVC_NAME).current_state != 'stopped'
+      begin
+        Service.stop(FLUENTD_WINSVC_NAME)
+      rescue => ex
+        puts "Warning: Failed to stop service: ", ex
+      end
+    end
+    Service.delete(FLUENTD_WINSVC_NAME)
+  else
+    # none
+  end
+  early_exit = true
+end
+
+if fluentdopt = opts[:fluentdopt]
+  Win32::Registry::HKEY_LOCAL_MACHINE.open("SYSTEM\\CurrentControlSet\\Services\\fluentdwinsvc", Win32::Registry::KEY_ALL_ACCESS) do |reg|
+    reg['fluentdopt', Win32::Registry::REG_SZ] = fluentdopt
+  end
+  early_exit = true
+end
+
+if start_service
+  Service.start(FLUENTD_WINSVC_NAME)
+end
+
+exit 0 if early_exit
+
+require 'fluent/supervisor'
+if opts[:supervise]
+  Fluent::Supervisor.new(opts).run_supervisor
+else
+  Fluent::Supervisor.new(opts).run_worker
+end
+
