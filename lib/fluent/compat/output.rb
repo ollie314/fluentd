@@ -18,8 +18,11 @@ require 'fluent/plugin'
 require 'fluent/plugin/output'
 require 'fluent/plugin/bare_output'
 require 'fluent/compat/call_super_mixin'
+require 'fluent/compat/propagate_default'
 require 'fluent/compat/output_chain'
 require 'fluent/timezone'
+require 'fluent/mixin'
+require 'fluent/process' # to load Fluent::DetachProcessMixin
 
 require 'fluent/plugin_helper/compat_parameters'
 
@@ -96,6 +99,12 @@ module Fluent
       end
     end
 
+    module AddKeyToChunkMixin
+      def key
+        self.metadata.variables[:key]
+      end
+    end
+
     module ChunkSizeCompatMixin
       def size
         self.bytesize
@@ -106,6 +115,7 @@ module Fluent
       # prepend this module to BufferedOutput (including ObjectBufferedOutput) plugin singleton class
       def write(chunk)
         chunk.extend(ChunkSizeCompatMixin)
+        chunk.extend(AddKeyToChunkMixin) if chunk.metadata.variables && chunk.metadata.variables.has_key?(:key)
         super
       end
     end
@@ -204,6 +214,11 @@ module Fluent
 
       PARAMS_MAP = Fluent::PluginHelper::CompatParameters::PARAMS_MAP
 
+      def self.propagate_default_params
+        PARAMS_MAP
+      end
+      include PropagateDefault
+
       def configure(conf)
         bufconf = CompatOutputUtils.buffer_section(conf)
         config_style = (bufconf ? :v1 : :v0)
@@ -226,8 +241,12 @@ module Fluent
           conf.elements << Fluent::Config::Element.new('buffer', '', buf_params, [])
         end
 
+        @includes_record_filter = self.class.ancestors.include?(Fluent::RecordFilterMixin) # TODO rename Compat::RecordFilterMixin
+
         methods_of_plugin = self.class.instance_methods(false)
-        @overrides_format_stream = methods_of_plugin.include?(:format_stream)
+        @overrides_emit = methods_of_plugin.include?(:emit)
+        # RecordFilter mixin uses its own #format_stream method implementation
+        @overrides_format_stream = methods_of_plugin.include?(:format_stream) || @includes_record_filter
 
         super
 
@@ -240,6 +259,45 @@ module Fluent
         (class << self; self; end).module_eval do
           prepend BufferedChunkMixin
         end
+
+        if @overrides_emit
+          self.singleton_class.module_eval do
+            attr_accessor :last_emit_via_buffer
+          end
+          output_plugin = self
+          m = Module.new do
+            define_method(:emit) do |key, data, chain|
+              # receivers of this method are buffer instances
+              output_plugin.last_emit_via_buffer = [key, data]
+            end
+          end
+          @buffer.singleton_class.module_eval do
+            prepend m
+          end
+        end
+      end
+
+      # original implementation of v0.12 BufferedOutput
+      def emit(tag, es, chain, key="")
+        # this method will not be used except for the case that plugin calls super
+        @emit_count += 1
+        data = format_stream(tag, es)
+        if @buffer.emit(key, data, chain)
+          submit_flush
+        end
+      end
+
+      def submit_flush
+        # nothing todo: blank method to be called from #emit of 3rd party plugins
+      end
+
+      def format_stream(tag, es)
+        # this method will not be used except for the case that plugin calls super
+        out = ''
+        es.each do |time, record|
+          out << format(tag, time, record)
+        end
+        out
       end
 
       # #format MUST be implemented in plugin
@@ -248,10 +306,30 @@ module Fluent
       # This method overrides Fluent::Plugin::Output#handle_stream_simple
       # because v0.12 BufferedOutput may overrides #format_stream, but original #handle_stream_simple method doesn't consider about it
       def handle_stream_simple(tag, es, enqueue: false)
+        if @overrides_emit
+          current_emit_count = @emit_count
+          size = es.size
+          key = data = nil
+          begin
+            emit(tag, es, NULL_OUTPUT_CHAIN)
+            key, data = self.last_emit_via_buffer
+          ensure
+            @emit_count = current_emit_count
+            self.last_emit_via_buffer = nil
+          end
+          # on-the-fly key assignment can be done, and it's not configurable if Plugin#emit does it dynamically
+          meta = @buffer.metadata(variables: (key && !key.empty? ? {key: key} : nil))
+          write_guard do
+            @buffer.write({meta => [data, size]}, bulk: true, enqueue: enqueue)
+          end
+          @counters_monitor.synchronize{ @emit_records += size }
+          return [meta]
+        end
+
         if @overrides_format_stream
           meta = metadata(nil, nil, nil)
-          bulk = format_stream(tag, es)
           size = es.size
+          bulk = format_stream(tag, es)
           write_guard do
             @buffer.write({meta => [bulk, size]}, bulk: true, enqueue: enqueue)
           end
@@ -331,6 +409,11 @@ module Fluent
       config_set_default :time_as_integer, true
 
       PARAMS_MAP = Fluent::PluginHelper::CompatParameters::PARAMS_MAP
+
+      def self.propagate_default_params
+        PARAMS_MAP
+      end
+      include PropagateDefault
 
       def configure(conf)
         bufconf = CompatOutputUtils.buffer_section(conf)
@@ -439,7 +522,7 @@ module Fluent
 
       attr_accessor :localtime
 
-      config_section :buffer, param_name: :buffer_config do
+      config_section :buffer do
         config_set_default :@type, 'file'
       end
 
@@ -456,12 +539,16 @@ module Fluent
         end
       end
 
+      def self.propagate_default_params
+        PARAMS_MAP
+      end
+      include PropagateDefault
+
       def configure(conf)
         bufconf = CompatOutputUtils.buffer_section(conf)
         config_style = (bufconf ? :v1 : :v0)
         if config_style == :v0
           buf_params = {
-            "@type"      => "file",
             "flush_mode" => (conf['flush_interval'] ? "interval" : "lazy"),
             "retry_type" => "exponential_backoff",
           }
@@ -474,9 +561,6 @@ module Fluent
                 buf_params[newer] = conf[older]
               end
             end
-          end
-          unless buf_params.has_key?("@type")
-            buf_params["@type"] = "file"
           end
 
           if conf['timezone']
@@ -531,3 +615,4 @@ module Fluent
     end
   end
 end
+

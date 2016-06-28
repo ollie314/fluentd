@@ -37,6 +37,8 @@ module Fluent
       CHUNK_KEY_PATTERN = /^[-_.@a-zA-Z0-9]+$/
       CHUNK_KEY_PLACEHOLDER_PATTERN = /\$\{[-_.@a-zA-Z0-9]+\}/
 
+      CHUNKING_FIELD_WARN_NUM = 4
+
       config_param :time_as_integer, :bool, default: false
 
       # `<buffer>` and `<secondary>` sections are available only when '#format' and '#write' are implemented
@@ -253,6 +255,10 @@ module Fluent
             @output_time_formatter_cache = {}
           end
 
+          if (@chunk_key_tag ? 1 : 0) + @chunk_keys.size >= CHUNKING_FIELD_WARN_NUM
+            log.warn "many chunk keys specified, and it may cause too many chunks on your system."
+          end
+
           # no chunk keys or only tags (chunking can be done without iterating event stream)
           @simple_chunking = !@chunk_key_time && @chunk_keys.empty?
 
@@ -287,6 +293,9 @@ module Fluent
           raise Fluent::ConfigError, "<secondary> section and 'retry_forever' are exclusive" if @buffer_config.retry_forever
 
           secondary_type = @secondary_config[:@type]
+          unless secondary_type
+            secondary_type = conf['@type'] # primary plugin type
+          end
           secondary_conf = conf.elements(name: 'secondary').first
           @secondary = Plugin.new_output(secondary_type)
           @secondary.acts_as_secondary(self)

@@ -119,7 +119,7 @@ module Fluent
         map = configure_proxy_map
         unless map[mod_name]
           type_lookup = ->(type) { Fluent::Configurable.lookup_type(type) }
-          proxy = Fluent::Config::ConfigureProxy.new(mod_name, required: true, multi: false, type_lookup: type_lookup)
+          proxy = Fluent::Config::ConfigureProxy.new(mod_name, root: true, required: true, multi: false, type_lookup: type_lookup)
           map[mod_name] = proxy
         end
         map[mod_name]
@@ -145,7 +145,10 @@ module Fluent
 
       def config_section(name, **kwargs, &block)
         configure_proxy(self.name).config_section(name, **kwargs, &block)
-        attr_accessor configure_proxy(self.name).sections[name].variable_name
+        variable_name = configure_proxy(self.name).sections[name].variable_name
+        unless self.respond_to?(variable_name)
+          attr_accessor variable_name
+        end
       end
 
       def desc(description)

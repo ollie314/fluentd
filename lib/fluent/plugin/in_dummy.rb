@@ -80,7 +80,7 @@ module Fluent::Plugin
           break unless (thread_current_running? && Time.now.to_i <= current_time)
           wait(0.1) { emit(batch_num) }
         end
-        emit(residual_num)
+        emit(residual_num) if thread_current_running?
         # wait for next second
         while thread_current_running? && Time.now.to_i <= current_time
           sleep 0.01
@@ -89,7 +89,11 @@ module Fluent::Plugin
     end
 
     def emit(num)
-      num.times { router.emit(@tag, Fluent::Engine.now, generate()) }
+      begin
+        num.times { router.emit(@tag, Fluent::Engine.now, generate()) }
+      rescue => _
+        # ignore all errors not to stop emits by emit errors
+      end
     end
 
     def generate
