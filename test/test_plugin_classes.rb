@@ -1,24 +1,26 @@
 require_relative 'helper'
-require 'fluent/input'
-require 'fluent/output'
-require 'fluent/filter'
+require 'fluent/plugin/input'
+require 'fluent/plugin/output'
+require 'fluent/plugin/filter'
 
 module FluentTest
-  class FluentTestInput < ::Fluent::Input
+  class FluentTestInput < ::Fluent::Plugin::Input
     ::Fluent::Plugin.register_input('test_in', self)
 
     attr_reader :started
 
     def start
+      super
       @started = true
     end
 
     def shutdown
       @started = false
+      super
     end
   end
 
-  class FluentTestOutput < ::Fluent::Output
+  class FluentTestOutput < ::Fluent::Plugin::Output
     ::Fluent::Plugin.register_output('test_out', self)
 
     def initialize
@@ -30,21 +32,23 @@ module FluentTest
     attr_reader :started
 
     def start
+      super
       @started = true
     end
 
     def shutdown
       @started = false
+      super
     end
 
-    def emit(tag, es, chain)
-      es.each { |time, record|
+    def process(tag, es)
+      es.each do |time, record|
         @events[tag] << record
-      }
+      end
     end
   end
 
-  class FluentTestErrorOutput < ::Fluent::BufferedOutput
+  class FluentTestErrorOutput < ::Fluent::Plugin::Output
     ::Fluent::Plugin.register_output('test_out_error', self)
 
     def format(tag, time, record)
@@ -56,7 +60,36 @@ module FluentTest
     end
   end
 
-  class FluentTestFilter < ::Fluent::Filter
+  class FluentCompatTestFilter < ::Fluent::Filter
+    ::Fluent::Plugin.register_filter('test_compat_filter', self)
+
+    def initialize(field = '__test__')
+      super()
+      @num = 0
+      @field = field
+    end
+
+    attr_reader :num
+    attr_reader :started
+
+    def start
+      super
+      @started = true
+    end
+
+    def shutdown
+      @started = false
+      super
+    end
+
+    def filter(tag, time, record)
+      record[@field] = @num
+      @num += 1
+      record
+    end
+  end
+
+  class FluentTestFilter < ::Fluent::Plugin::Filter
     ::Fluent::Plugin.register_filter('test_filter', self)
 
     def initialize(field = '__test__')
@@ -69,11 +102,13 @@ module FluentTest
     attr_reader :started
 
     def start
+      super
       @started = true
     end
 
     def shutdown
       @started = false
+      super
     end
 
     def filter(tag, time, record)

@@ -98,6 +98,17 @@ module FluentPluginOutputTest
 end
 
 class OutputTest < Test::Unit::TestCase
+    class << self
+      def startup
+        $LOAD_PATH.unshift File.expand_path(File.join(File.dirname(__FILE__), '../scripts'))
+        require 'fluent/plugin/out_test'
+      end
+
+      def shutdown
+        $LOAD_PATH.shift
+      end
+    end
+
   def create_output(type=:full)
     case type
     when :bare     then FluentPluginOutputTest::DummyBareOutput.new
@@ -181,6 +192,9 @@ class OutputTest < Test::Unit::TestCase
       assert !@i.started?
       @i.start
       assert @i.started?
+      assert !@i.after_started?
+      @i.after_start
+      assert @i.after_started?
       assert !@i.stopped?
       @i.stop
       assert @i.stopped?
@@ -318,6 +332,7 @@ class OutputTest < Test::Unit::TestCase
       i.register(:process){|tag, es| process_called = true }
       i.configure(config_element())
       i.start
+      i.after_start
 
       t = event_time()
       i.emit_events('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
@@ -333,6 +348,7 @@ class OutputTest < Test::Unit::TestCase
       i.register(:format){|tag, time, record| format_called_times += 1; '' }
       i.configure(config_element())
       i.start
+      i.after_start
 
       t = event_time()
       i.emit_events('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
@@ -353,6 +369,7 @@ class OutputTest < Test::Unit::TestCase
       i.configure(config_element())
       i.register(:prefer_buffered_processing){ false } # delayed decision is possible to change after (output's) configure
       i.start
+      i.after_start
 
       assert !i.prefer_buffered_processing
 
@@ -378,6 +395,7 @@ class OutputTest < Test::Unit::TestCase
       i.configure(config_element())
       i.register(:prefer_buffered_processing){ true } # delayed decision is possible to change after (output's) configure
       i.start
+      i.after_start
 
       assert i.prefer_buffered_processing
 
@@ -397,6 +415,7 @@ class OutputTest < Test::Unit::TestCase
 
       i.configure(config_element('ROOT', '', {}, [config_element('buffer', '', {"flush_mode" => "immediate"})]))
       i.start
+      i.after_start
 
       t = event_time()
       i.emit_events('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
@@ -416,6 +435,7 @@ class OutputTest < Test::Unit::TestCase
 
       i.configure(config_element('ROOT', '', {}, [config_element('buffer', '', {"flush_mode" => "immediate"})]))
       i.start
+      i.after_start
 
       t = event_time()
       i.emit_events('tag', Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ]))
@@ -438,6 +458,7 @@ class OutputTest < Test::Unit::TestCase
       i.configure(config_element('ROOT', '', {}, [config_element('buffer', '', {"flush_mode" => "immediate"})]))
       i.register(:prefer_delayed_commit){ false } # delayed decision is possible to change after (output's) configure
       i.start
+      i.after_start
 
       assert !i.prefer_delayed_commit
 
@@ -463,6 +484,7 @@ class OutputTest < Test::Unit::TestCase
       i.configure(config_element('ROOT', '', {}, [config_element('buffer', '', {"flush_mode" => "immediate"})]))
       i.register(:prefer_delayed_commit){ true } # delayed decision is possible to change after (output's) configure
       i.start
+      i.after_start
 
       assert i.prefer_delayed_commit
 
@@ -476,6 +498,36 @@ class OutputTest < Test::Unit::TestCase
       assert try_write_called
 
       i.stop; i.before_shutdown; i.shutdown; i.after_shutdown; i.close; i.terminate
+    end
+
+    test "Warn if primary type is different from secondary type and either primary or secondary has custom_format" do
+      o = create_output(:buffered)
+      mock(o.log).warn("secondary type should be same with primary one",
+                                { primary: o.class.to_s, secondary: "Fluent::Plugin::TestOutput" })
+
+      o.configure(config_element('ROOT','',{},[config_element('secondary','',{'@type'=>'test', 'name' => "cool"})]))
+      assert_not_nil o.instance_variable_get(:@secondary)
+    end
+
+    test "don't warn if primary type is the same as secondary type" do
+      o = Fluent::Plugin::TestOutput.new
+      mock(o.log).warn("secondary type should be same with primary one",
+                                { primary: o.class.to_s, secondary: "Fluent::Plugin::TestOutput" }).never
+
+      o.configure(config_element('ROOT','',{'name' => "cool2"},
+                                 [config_element('secondary','',{'@type'=>'test', 'name' => "cool"}),
+                                  config_element('buffer','',{'@type'=>'memory'})]
+                                ))
+      assert_not_nil o.instance_variable_get(:@secondary)
+    end
+
+    test "don't warn if primary type is different from secondary type and both don't have custom_format" do
+      o = create_output(:standard)
+      mock(o.log).warn("secondary type should be same with primary one",
+                                { primary: o.class.to_s, secondary: "Fluent::Plugin::TestOutput" }).never
+
+      o.configure(config_element('ROOT','',{},[config_element('secondary','',{'@type'=>'test', 'name' => "cool"})]))
+      assert_not_nil o.instance_variable_get(:@secondary)
     end
   end
 
@@ -501,6 +553,7 @@ class OutputTest < Test::Unit::TestCase
       @i.register(:process){|tag, es| ary << [tag, es] }
       @i.configure(config_element())
       @i.start
+      @i.after_start
 
       t = event_time()
       es = Fluent::ArrayEventStream.new([ [t, {"key" => "value1"}], [t, {"key" => "value2"}] ])
@@ -510,6 +563,38 @@ class OutputTest < Test::Unit::TestCase
       assert_equal 5, ary.size
 
       @i.stop; @i.before_shutdown; @i.shutdown; @i.after_shutdown; @i.close; @i.terminate
+    end
+  end
+
+  sub_test_case '#generate_format_proc' do
+    test "when output doesn't have <buffer>" do
+      i = create_output(:sync)
+      i.configure(config_element('ROOT', '', {}, []))
+      assert_equal Fluent::Plugin::Output::FORMAT_MSGPACK_STREAM, i.generate_format_proc
+    end
+
+    test "when output doesn't have <buffer> and time_as_integer is true" do
+      i = create_output(:sync)
+      i.configure(config_element('ROOT', '', {'time_as_integer' => true}))
+      assert_equal Fluent::Plugin::Output::FORMAT_MSGPACK_STREAM_TIME_INT, i.generate_format_proc
+    end
+
+    test 'when output has <buffer> and compress is gzip' do
+      i = create_output(:buffered)
+      i.configure(config_element('ROOT', '', {}, [config_element('buffer', '', {'compress' => 'gzip'})]))
+      assert_equal Fluent::Plugin::Output::FORMAT_COMPRESSED_MSGPACK_STREAM, i.generate_format_proc
+    end
+
+    test 'when output has <buffer> and compress is gzip and time_as_integer is true' do
+      i = create_output(:buffered)
+      i.configure(config_element('ROOT', '', {'time_as_integer' => true}, [config_element('buffer', '', {'compress' => 'gzip'})]))
+      assert_equal Fluent::Plugin::Output::FORMAT_COMPRESSED_MSGPACK_STREAM_TIME_INT, i.generate_format_proc
+    end
+
+    test 'when output has <buffer> and compress is text' do
+      i = create_output(:buffered)
+      i.configure(config_element('ROOT', '', {}, [config_element('buffer', '', {'compress' => 'text'})]))
+      assert_equal Fluent::Plugin::Output::FORMAT_MSGPACK_STREAM, i.generate_format_proc
     end
   end
 end

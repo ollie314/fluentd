@@ -47,6 +47,83 @@ class RootAgentTest < ::Test::Unit::TestCase
       assert_nil ra.error_collector
     end
 
+    test 'raises configuration error for missing type of source' do
+      conf = <<-EOC
+<source>
+</source>
+EOC
+      errmsg = "Missing '@type' parameter on <source> directive"
+      assert_raise Fluent::ConfigError.new(errmsg) do
+        configure_ra(conf)
+      end
+    end
+
+    test 'raises configuration error for missing type of match' do
+      conf = <<-EOC
+<source>
+  @type test_in
+</source>
+<match *.**>
+</match>
+EOC
+      errmsg = "Missing '@type' parameter on <match> directive"
+      assert_raise Fluent::ConfigError.new(errmsg) do
+        configure_ra(conf)
+      end
+    end
+
+    test 'raises configuration error for missing type of filter' do
+      conf = <<-EOC
+<source>
+  @type test_in
+</source>
+<filter *.**>
+</filter>
+<match *.**>
+  @type test_out
+</match>
+EOC
+      errmsg = "Missing '@type' parameter on <filter> directive"
+      assert_raise Fluent::ConfigError.new(errmsg) do
+        configure_ra(conf)
+      end
+    end
+
+    test 'raises configuration error if there are two same label section' do
+      conf = <<-EOC
+<source>
+  @type test_in
+  @label @test
+</source>
+<label @test>
+  @type test_out
+</label>
+<label @test>
+  @type test_out
+</label>
+EOC
+      errmsg = "Section <label @test> appears twice"
+      assert_raise Fluent::ConfigError.new(errmsg) do
+        configure_ra(conf)
+      end
+    end
+
+    test 'raises configuration error if there are not match sections in label section' do
+      conf = <<-EOC
+<source>
+  @type test_in
+  @label @test
+</source>
+<label @test>
+  @type test_out
+</label>
+EOC
+      errmsg = "Missing <match> sections in <label @test> section"
+      assert_raise Fluent::ConfigError.new(errmsg) do
+        configure_ra(conf)
+      end
+    end
+
     test 'with plugins' do
       # check @type and type in one configuration
       conf = <<-EOC
@@ -127,6 +204,152 @@ EOC
       assert_false @ra.inputs.first.started
       assert_false @ra.filters.first.started
       assert_false @ra.outputs.first.started
+    end
+  end
+
+  sub_test_case 'configured with MultiOutput plugins' do
+    setup do
+      @ra = RootAgent.new(log: $log)
+      stub(Engine).root_agent { @ra }
+      @ra.configure(Config.parse(<<-EOC, "(test)", "(test_dir)", true))
+<source>
+  @type test_in
+  @id test_in
+</source>
+<filter>
+  @type test_filter
+  @id test_filter
+</filter>
+<match **>
+  @type copy
+  @id test_copy
+  <store>
+    @type test_out
+    @id test_out1
+  </store>
+  <store>
+    @type test_out
+    @id test_out2
+  </store>
+</match>
+EOC
+      @ra
+    end
+
+    test 'plugin status with multi output' do
+      assert_equal 1, @ra.inputs.size
+      assert_equal 1, @ra.filters.size
+      assert_equal 3, @ra.outputs.size
+
+      @ra.start
+      assert_equal [true], @ra.inputs.map{|i| i.started? }
+      assert_equal [true], @ra.filters.map{|i| i.started? }
+      assert_equal [true, true, true], @ra.outputs.map{|i| i.started? }
+
+      assert_equal [true], @ra.inputs.map{|i| i.after_started? }
+      assert_equal [true], @ra.filters.map{|i| i.after_started? }
+      assert_equal [true, true, true], @ra.outputs.map{|i| i.after_started? }
+
+      @ra.shutdown
+      assert_equal [true], @ra.inputs.map{|i| i.stopped? }
+      assert_equal [true], @ra.filters.map{|i| i.stopped? }
+      assert_equal [true, true, true], @ra.outputs.map{|i| i.stopped? }
+
+      assert_equal [true], @ra.inputs.map{|i| i.before_shutdown? }
+      assert_equal [true], @ra.filters.map{|i| i.before_shutdown? }
+      assert_equal [true, true, true], @ra.outputs.map{|i| i.before_shutdown? }
+
+      assert_equal [true], @ra.inputs.map{|i| i.shutdown? }
+      assert_equal [true], @ra.filters.map{|i| i.shutdown? }
+      assert_equal [true, true, true], @ra.outputs.map{|i| i.shutdown? }
+
+      assert_equal [true], @ra.inputs.map{|i| i.after_shutdown? }
+      assert_equal [true], @ra.filters.map{|i| i.after_shutdown? }
+      assert_equal [true, true, true], @ra.outputs.map{|i| i.after_shutdown? }
+
+      assert_equal [true], @ra.inputs.map{|i| i.closed? }
+      assert_equal [true], @ra.filters.map{|i| i.closed? }
+      assert_equal [true, true, true], @ra.outputs.map{|i| i.closed? }
+
+      assert_equal [true], @ra.inputs.map{|i| i.terminated? }
+      assert_equal [true], @ra.filters.map{|i| i.terminated? }
+      assert_equal [true, true, true], @ra.outputs.map{|i| i.terminated? }
+    end
+  end
+
+  sub_test_case 'configured with MultiOutput plugins and labels' do
+    setup do
+      @ra = RootAgent.new(log: $log)
+      stub(Engine).root_agent { @ra }
+      @ra.configure(Config.parse(<<-EOC, "(test)", "(test_dir)", true))
+<source>
+  @type test_in
+  @id test_in
+  @label @testing
+</source>
+<label @testing>
+  <filter>
+    @type test_filter
+    @id test_filter
+  </filter>
+  <match **>
+    @type copy
+    @id test_copy
+    <store>
+      @type test_out
+      @id test_out1
+    </store>
+    <store>
+      @type test_out
+      @id test_out2
+    </store>
+  </match>
+</label>
+EOC
+      @ra
+    end
+
+    test 'plugin status with multi output' do
+      assert_equal 1, @ra.inputs.size
+      assert_equal 0, @ra.filters.size
+      assert_equal 0, @ra.outputs.size
+      assert_equal 1, @ra.labels.size
+      assert_equal '@testing', @ra.labels.keys.first
+      assert_equal 1, @ra.labels.values.first.filters.size
+      assert_equal 3, @ra.labels.values.first.outputs.size
+
+      label_filters = @ra.labels.values.first.filters
+      label_outputs = @ra.labels.values.first.outputs
+
+      @ra.start
+      assert_equal [true], @ra.inputs.map{|i| i.started? }
+      assert_equal [true], label_filters.map{|i| i.started? }
+      assert_equal [true, true, true], label_outputs.map{|i| i.started? }
+
+      @ra.shutdown
+      assert_equal [true], @ra.inputs.map{|i| i.stopped? }
+      assert_equal [true], label_filters.map{|i| i.stopped? }
+      assert_equal [true, true, true], label_outputs.map{|i| i.stopped? }
+
+      assert_equal [true], @ra.inputs.map{|i| i.before_shutdown? }
+      assert_equal [true], label_filters.map{|i| i.before_shutdown? }
+      assert_equal [true, true, true], label_outputs.map{|i| i.before_shutdown? }
+
+      assert_equal [true], @ra.inputs.map{|i| i.shutdown? }
+      assert_equal [true], label_filters.map{|i| i.shutdown? }
+      assert_equal [true, true, true], label_outputs.map{|i| i.shutdown? }
+
+      assert_equal [true], @ra.inputs.map{|i| i.after_shutdown? }
+      assert_equal [true], label_filters.map{|i| i.after_shutdown? }
+      assert_equal [true, true, true], label_outputs.map{|i| i.after_shutdown? }
+
+      assert_equal [true], @ra.inputs.map{|i| i.closed? }
+      assert_equal [true], label_filters.map{|i| i.closed? }
+      assert_equal [true, true, true], label_outputs.map{|i| i.closed? }
+
+      assert_equal [true], @ra.inputs.map{|i| i.terminated? }
+      assert_equal [true], label_filters.map{|i| i.terminated? }
+      assert_equal [true, true, true], label_outputs.map{|i| i.terminated? }
     end
   end
 end

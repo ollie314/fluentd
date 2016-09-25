@@ -25,21 +25,20 @@ module Fluent
       Plugin.register_parser('json', self)
 
       config_param :time_key, :string, default: 'time'
-      config_param :time_format, :string, default: nil
       config_param :json_parser, :string, default: 'oj'
 
       def configure(conf)
         super
 
-        unless @time_format.nil?
-          @time_parser = TimeParser.new(@time_format)
+        if @time_format
+          @time_parser = time_parser_create
           @mutex = Mutex.new
         end
 
         begin
           raise LoadError unless @json_parser == 'oj'
           require 'oj'
-          Oj.default_options = {bigdecimal_load: :float}
+          Oj.default_options = {bigdecimal_load: :float, mode: :strict}
           @load_proc = Oj.method(:load)
           @error_class = Oj::ParseError
         rescue LoadError

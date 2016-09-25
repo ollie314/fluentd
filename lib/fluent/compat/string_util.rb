@@ -14,19 +14,21 @@
 #    limitations under the License.
 #
 
-require 'fluent/plugin/base'
-require 'fluent/plugin_id'
-require 'fluent/log'
-require 'fluent/plugin_helper'
-
 module Fluent
-  module Test
-    module Driver
-      class Owner < Fluent::Plugin::Base
-        include PluginId
-        include PluginLoggerMixin
-        include PluginHelper::Mixin
+  module Compat
+    module StringUtil
+      def match_regexp(regexp, string)
+        begin
+          return regexp.match(string)
+        rescue ArgumentError => e
+          raise e unless e.message.index("invalid byte sequence in".freeze).zero?
+          $log.info "invalid byte sequence is replaced in `#{string}`"
+          string = string.scrub('?')
+          retry
+        end
+        return true
       end
+      module_function :match_regexp
     end
   end
 end

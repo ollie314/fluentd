@@ -17,19 +17,25 @@
 require 'fluent/plugin'
 require 'fluent/plugin/parser'
 require 'fluent/config/element'
+require 'fluent/configurable'
 
 module Fluent
   module PluginHelper
     module Parser
-      def parser_create(usage: '', type: nil, conf: nil)
+      def parser_create(usage: '', type: nil, conf: nil, default_type: nil)
         parser = @_parsers[usage]
         return parser if parser
 
-        if !type
-          raise ArgumentError, "BUG: both type and conf are not specified" unless conf
-          raise Fluent::ConfigError, "@type is required in <parse>" unless conf['@type']
-          type = conf['@type']
-        end
+        type = if type
+                 type
+               elsif conf && conf.respond_to?(:[])
+                 raise Fluent::ConfigError, "@type is required in <parse>" unless conf['@type']
+                 conf['@type']
+               elsif default_type
+                 default_type
+               else
+                 raise ArgumentError, "BUG: both type and conf are not specified"
+               end
         parser = Fluent::Plugin.new_parser(type, parent: self)
         config = case conf
                  when Fluent::Config::Element
@@ -52,14 +58,17 @@ module Fluent
         parser
       end
 
-      def self.included(mod)
-        mod.instance_eval do
-          # minimum section definition to instantiate parser plugin instances
-          config_section :parse, required: false, multi: true, param_name: :parser_configs do
-            config_argument :usage, :string, default: ''
-            config_param    :@type, :string
-          end
+      module ParserParams
+        include Fluent::Configurable
+        # minimum section definition to instantiate parser plugin instances
+        config_section :parse, required: false, multi: true, param_name: :parser_configs do
+          config_argument :usage, :string, default: ''
+          config_param    :@type, :string
         end
+      end
+
+      def self.included(mod)
+        mod.include ParserParams
       end
 
       attr_reader :_parsers # for tests

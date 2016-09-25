@@ -18,7 +18,11 @@ require 'fluent/plugin'
 require 'fluent/plugin/output'
 require 'fluent/plugin/bare_output'
 require 'fluent/compat/call_super_mixin'
+require 'fluent/compat/formatter_utils'
+require 'fluent/compat/handle_tag_and_time_mixin'
+require 'fluent/compat/parser_utils'
 require 'fluent/compat/propagate_default'
+require 'fluent/compat/record_filter_mixin'
 require 'fluent/compat/output_chain'
 require 'fluent/timezone'
 require 'fluent/mixin'
@@ -109,6 +113,10 @@ module Fluent
       def size
         self.bytesize
       end
+
+      def size_of_events
+        @size + @adding_size
+      end
     end
 
     module BufferedChunkMixin
@@ -136,7 +144,7 @@ module Fluent
     class Output < Fluent::Plugin::Output
       # TODO: warn when deprecated
 
-      helpers :event_emitter
+      helpers :event_emitter, :inject
 
       def support_in_v12_style?(feature)
         case feature
@@ -154,8 +162,26 @@ module Fluent
       def initialize
         super
         unless self.class.ancestors.include?(Fluent::Compat::CallSuperMixin)
-          self.class.module_eval do
-            prepend Fluent::Compat::CallSuperMixin
+          self.class.prepend Fluent::Compat::CallSuperMixin
+        end
+      end
+
+      def configure(conf)
+        ParserUtils.convert_parser_conf(conf)
+        FormatterUtils.convert_formatter_conf(conf)
+
+        super
+      end
+
+      def start
+        super
+
+        if instance_variable_defined?(:@formatter) && @inject_config
+          unless @formatter.class.ancestors.include?(Fluent::Compat::HandleTagAndTimeMixin)
+            if @formatter.respond_to?(:owner) && !@formatter.owner
+              @formatter.owner = self
+              @formatter.singleton_class.prepend FormatterUtils::InjectMixin
+            end
           end
         end
       end
@@ -174,7 +200,7 @@ module Fluent
     class BufferedOutput < Fluent::Plugin::Output
       # TODO: warn when deprecated
 
-      helpers :event_emitter
+      helpers :event_emitter, :inject
 
       def support_in_v12_style?(feature)
         case feature
@@ -212,10 +238,10 @@ module Fluent
 
       config_param :flush_at_shutdown, :bool, default: true
 
-      PARAMS_MAP = Fluent::PluginHelper::CompatParameters::PARAMS_MAP
+      BUFFER_PARAMS = Fluent::PluginHelper::CompatParameters::BUFFER_PARAMS
 
       def self.propagate_default_params
-        PARAMS_MAP
+        BUFFER_PARAMS
       end
       include PropagateDefault
 
@@ -227,7 +253,7 @@ module Fluent
             "flush_mode" => "interval",
             "retry_type" => "exponential_backoff",
           }
-          PARAMS_MAP.each do |older, newer|
+          BUFFER_PARAMS.each do |older, newer|
             next unless newer
             if conf.has_key?(older)
               if older == 'buffer_queue_full_action' && conf[older] == 'exception'
@@ -241,12 +267,15 @@ module Fluent
           conf.elements << Fluent::Config::Element.new('buffer', '', buf_params, [])
         end
 
-        @includes_record_filter = self.class.ancestors.include?(Fluent::RecordFilterMixin) # TODO rename Compat::RecordFilterMixin
+        @includes_record_filter = self.class.ancestors.include?(Fluent::Compat::RecordFilterMixin)
 
         methods_of_plugin = self.class.instance_methods(false)
         @overrides_emit = methods_of_plugin.include?(:emit)
         # RecordFilter mixin uses its own #format_stream method implementation
         @overrides_format_stream = methods_of_plugin.include?(:format_stream) || @includes_record_filter
+
+        ParserUtils.convert_parser_conf(conf)
+        FormatterUtils.convert_formatter_conf(conf)
 
         super
 
@@ -256,9 +285,7 @@ module Fluent
           end
         end
 
-        (class << self; self; end).module_eval do
-          prepend BufferedChunkMixin
-        end
+        self.extend BufferedChunkMixin
 
         if @overrides_emit
           self.singleton_class.module_eval do
@@ -271,9 +298,7 @@ module Fluent
               output_plugin.last_emit_via_buffer = [key, data]
             end
           end
-          @buffer.singleton_class.module_eval do
-            prepend m
-          end
+          @buffer.extend m
         end
       end
 
@@ -320,7 +345,7 @@ module Fluent
           # on-the-fly key assignment can be done, and it's not configurable if Plugin#emit does it dynamically
           meta = @buffer.metadata(variables: (key && !key.empty? ? {key: key} : nil))
           write_guard do
-            @buffer.write({meta => [data, size]}, bulk: true, enqueue: enqueue)
+            @buffer.write({meta => data}, format: ->(_data){ _data }, size: ->(){ size }, enqueue: enqueue)
           end
           @counters_monitor.synchronize{ @emit_records += size }
           return [meta]
@@ -331,19 +356,19 @@ module Fluent
           size = es.size
           bulk = format_stream(tag, es)
           write_guard do
-            @buffer.write({meta => [bulk, size]}, bulk: true, enqueue: enqueue)
+            @buffer.write({meta => bulk}, format: ->(_data){ _data }, size: ->(){ size }, enqueue: enqueue)
           end
           @counters_monitor.synchronize{ @emit_records += size }
           return [meta]
         end
 
         meta = metadata(nil, nil, nil)
-        es_size = 0
-        es_bulk = es.map{|time,record| es_size += 1; format(tag, time, record) }.join
+        size = es.size
+        data = es.map{|time,record| format(tag, time, record) }
         write_guard do
-          @buffer.write({meta => [es_bulk, es_size]}, bulk: true, enqueue: enqueue)
+          @buffer.write({meta => data}, enqueue: enqueue)
         end
-        @counters_monitor.synchronize{ @emit_records += es_size }
+        @counters_monitor.synchronize{ @emit_records += size }
         [meta]
       end
 
@@ -354,8 +379,19 @@ module Fluent
       def initialize
         super
         unless self.class.ancestors.include?(Fluent::Compat::CallSuperMixin)
-          self.class.module_eval do
-            prepend Fluent::Compat::CallSuperMixin
+          self.class.prepend Fluent::Compat::CallSuperMixin
+        end
+      end
+
+      def start
+        super
+
+        if instance_variable_defined?(:@formatter) && @inject_config
+          unless @formatter.class.ancestors.include?(Fluent::Compat::HandleTagAndTimeMixin)
+            if @formatter.respond_to?(:owner) && !@formatter.owner
+              @formatter.owner = self
+              @formatter.singleton_class.prepend FormatterUtils::InjectMixin
+            end
           end
         end
       end
@@ -364,7 +400,7 @@ module Fluent
     class ObjectBufferedOutput < Fluent::Plugin::Output
       # TODO: warn when deprecated
 
-      helpers :event_emitter
+      helpers :event_emitter, :inject
 
       # This plugin cannot inherit BufferedOutput because #configure sets chunk_key 'tag'
       # to flush chunks per tags, but BufferedOutput#configure doesn't allow setting chunk_key
@@ -408,10 +444,10 @@ module Fluent
 
       config_set_default :time_as_integer, true
 
-      PARAMS_MAP = Fluent::PluginHelper::CompatParameters::PARAMS_MAP
+      BUFFER_PARAMS = Fluent::PluginHelper::CompatParameters::BUFFER_PARAMS
 
       def self.propagate_default_params
-        PARAMS_MAP
+        BUFFER_PARAMS
       end
       include PropagateDefault
 
@@ -423,7 +459,7 @@ module Fluent
             "flush_mode" => "interval",
             "retry_type" => "exponential_backoff",
           }
-          PARAMS_MAP.each do |older, newer|
+          BUFFER_PARAMS.each do |older, newer|
             next unless newer
             if conf.has_key?(older)
               if older == 'buffer_queue_full_action' && conf[older] == 'exception'
@@ -437,6 +473,9 @@ module Fluent
           conf.elements << Fluent::Config::Element.new('buffer', 'tag', buf_params, [])
         end
 
+        ParserUtils.convert_parser_conf(conf)
+        FormatterUtils.convert_formatter_conf(conf)
+
         super
 
         if config_style == :v1
@@ -445,13 +484,15 @@ module Fluent
           end
         end
 
-        (class << self; self; end).module_eval do
-          prepend BufferedChunkMixin
-        end
+        self.extend BufferedChunkMixin
       end
 
       def format_stream(tag, es) # for BufferedOutputTestDriver
-        es.to_msgpack_stream(time_int: @time_as_integer)
+        if @compress == :gzip
+          es.to_compressed_msgpack_stream(time_int: @time_as_integer)
+        else
+          es.to_msgpack_stream(time_int: @time_as_integer)
+        end
       end
 
       def write(chunk)
@@ -465,8 +506,19 @@ module Fluent
       def initialize
         super
         unless self.class.ancestors.include?(Fluent::Compat::CallSuperMixin)
-          self.class.module_eval do
-            prepend Fluent::Compat::CallSuperMixin
+          self.class.prepend Fluent::Compat::CallSuperMixin
+        end
+      end
+
+      def start
+        super
+
+        if instance_variable_defined?(:@formatter) && @inject_config
+          unless @formatter.class.ancestors.include?(Fluent::Compat::HandleTagAndTimeMixin)
+            if @formatter.respond_to?(:owner) && !@formatter.owner
+              @formatter.owner = self
+              @formatter.singleton_class.prepend FormatterUtils::InjectMixin
+            end
           end
         end
       end
@@ -475,7 +527,7 @@ module Fluent
     class TimeSlicedOutput < Fluent::Plugin::Output
       # TODO: warn when deprecated
 
-      helpers :event_emitter
+      helpers :event_emitter, :inject
 
       def support_in_v12_style?(feature)
         case feature
@@ -526,21 +578,19 @@ module Fluent
         config_set_default :@type, 'file'
       end
 
-      PARAMS_MAP = Fluent::PluginHelper::CompatParameters::PARAMS_MAP.merge(Fluent::PluginHelper::CompatParameters::TIME_SLICED_PARAMS)
+      BUFFER_PARAMS = Fluent::PluginHelper::CompatParameters::BUFFER_PARAMS.merge(Fluent::PluginHelper::CompatParameters::BUFFER_TIME_SLICED_PARAMS)
 
       def initialize
         super
         @localtime = true
 
         unless self.class.ancestors.include?(Fluent::Compat::CallSuperMixin)
-          self.class.module_eval do
-            prepend Fluent::Compat::CallSuperMixin
-          end
+          self.class.prepend Fluent::Compat::CallSuperMixin
         end
       end
 
       def self.propagate_default_params
-        PARAMS_MAP
+        BUFFER_PARAMS
       end
       include PropagateDefault
 
@@ -552,7 +602,7 @@ module Fluent
             "flush_mode" => (conf['flush_interval'] ? "interval" : "lazy"),
             "retry_type" => "exponential_backoff",
           }
-          PARAMS_MAP.each do |older, newer|
+          BUFFER_PARAMS.each do |older, newer|
             next unless newer
             if conf.has_key?(older)
               if older == 'buffer_queue_full_action' && conf[older] == 'exception'
@@ -591,6 +641,9 @@ module Fluent
           conf.elements << Fluent::Config::Element.new('buffer', 'time', buf_params, [])
         end
 
+        ParserUtils.convert_parser_conf(conf)
+        FormatterUtils.convert_formatter_conf(conf)
+
         super
 
         if config_style == :v1
@@ -599,8 +652,19 @@ module Fluent
           end
         end
 
-        (class << self; self; end).module_eval do
-          prepend TimeSliceChunkMixin
+        self.extend TimeSliceChunkMixin
+      end
+
+      def start
+        super
+
+        if instance_variable_defined?(:@formatter) && @inject_config
+          unless @formatter.class.ancestors.include?(Fluent::Compat::HandleTagAndTimeMixin)
+            if @formatter.respond_to?(:owner) && !@formatter.owner
+              @formatter.owner = self
+              @formatter.singleton_class.prepend FormatterUtils::InjectMixin
+            end
+          end
         end
       end
 
@@ -615,4 +679,3 @@ module Fluent
     end
   end
 end
-

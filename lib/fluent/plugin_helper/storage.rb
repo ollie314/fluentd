@@ -20,6 +20,7 @@ require 'fluent/plugin'
 require 'fluent/plugin/storage'
 require 'fluent/plugin_helper/timer'
 require 'fluent/config/element'
+require 'fluent/configurable'
 
 module Fluent
   module PluginHelper
@@ -28,18 +29,23 @@ module Fluent
 
       StorageState = Struct.new(:storage, :running)
 
-      def storage_create(usage: '', type: nil, conf: nil)
+      def storage_create(usage: '', type: nil, conf: nil, default_type: nil)
         s = @_storages[usage]
         if s && s.running
           return s.storage
         elsif s
           # storage is already created, but not loaded / started
         else # !s
-          if !type
-            raise ArgumentError, "BUG: both type and conf are not specified" unless conf
-            raise Fluent::ConfigError, "@type is not specified for <storage>" unless conf['@type']
-            type = conf['@type']
-          end
+          type = if type
+                   type
+                 elsif conf && conf.respond_to?(:[])
+                   raise Fluent::ConfigError, "@type is required in <storage>" unless conf['@type']
+                   conf['@type']
+                 elsif default_type
+                   default_type
+                 else
+                   raise ArgumentError, "BUG: both type and conf are not specified"
+                 end
           storage = Plugin.new_storage(type, parent: self)
           config = case conf
                    when Fluent::Config::Element
@@ -63,14 +69,17 @@ module Fluent
         s.storage
       end
 
-      def self.included(mod)
-        mod.instance_eval do
-          # minimum section definition to instantiate storage plugin instances
-          config_section :storage, required: false, multi: true, param_name: :storage_configs do
-            config_argument :usage, :string, default: ''
-            config_param    :@type, :string, default: Fluent::Plugin::Storage::DEFAULT_TYPE
-          end
+      module StorageParams
+        include Fluent::Configurable
+        # minimum section definition to instantiate storage plugin instances
+        config_section :storage, required: false, multi: true, param_name: :storage_configs do
+          config_argument :usage, :string, default: ''
+          config_param    :@type, :string, default: Fluent::Plugin::Storage::DEFAULT_TYPE
         end
+      end
+
+      def self.included(mod)
+        mod.include StorageParams
       end
 
       attr_reader :_storages # for tests

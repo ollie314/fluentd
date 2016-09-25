@@ -21,9 +21,6 @@ module Fluent
     class JSONFormatter < Formatter
       Plugin.register_formatter('json', self)
 
-      include HandleTagAndTimeMixin
-      include StructuredFormatMixin
-
       config_param :json_parser, :string, default: 'oj'
 
       def configure(conf)
@@ -39,7 +36,7 @@ module Fluent
         end
       end
 
-      def format_record(record)
+      def format(tag, time, record)
         "#{@dump_proc.call(record)}\n"
       end
     end

@@ -17,13 +17,15 @@
 require 'cool.io'
 require 'yajl'
 
-require 'fluent/input'
+require 'fluent/plugin/input'
 require 'fluent/config/error'
-require 'fluent/parser'
+require 'fluent/plugin/parser'
 
-module Fluent
+module Fluent::Plugin
   class SyslogInput < Input
-    Plugin.register_input('syslog', self)
+    Fluent::Plugin.register_input('syslog', self)
+
+    helpers :parser, :event_loop
 
     SYSLOG_REGEXP = /^\<([0-9]+)\>(.*)/
 
@@ -92,6 +94,7 @@ module Fluent
     desc 'Specify key of source host when include_source_host is true.'
     config_param :source_host_key, :string, default: 'source_host'.freeze
     config_param :blocking_timeout, :time, default: 0.5
+    config_param :message_length_limit, :size, default: 2048
 
     def configure(conf)
       super
@@ -99,14 +102,13 @@ module Fluent
       @use_default = false
 
       if conf.has_key?('format')
-        @parser = Plugin.new_parser(conf['format'])
-        @parser.configure(conf)
+        @parser = parser_create(usage: 'syslog_input', type: conf['format'], conf: conf)
       else
         conf['with_priority'] = true
-        @parser = TextParser::SyslogParser.new
-        @parser.configure(conf)
+        @parser = parser_create(usage: 'syslog_input', type: 'syslog', conf: conf)
         @use_default = true
       end
+      @_event_loop_run_timeout = @blocking_timeout
     end
 
     def start
@@ -118,27 +120,14 @@ module Fluent
                    method(:receive_data_parser)
                  end
 
-      @loop = Coolio::Loop.new
       @handler = listen(callback)
-      @loop.attach(@handler)
-
-      @thread = Thread.new(&method(:run))
+      event_loop_attach(@handler)
     end
 
     def shutdown
-      @loop.watchers.each {|w| w.detach }
-      @loop.stop
       @handler.close
-      @thread.join
 
       super
-    end
-
-    def run
-      @loop.run(@blocking_timeout)
-    rescue
-      log.error "unexpected error", error: $!.to_s
-      log.error_backtrace
     end
 
     private
@@ -193,11 +182,11 @@ module Fluent
       client = ServerEngine::SocketManager::Client.new(socket_manager_path)
       if @protocol_type == :udp
         @usock = client.listen_udp(@bind, @port)
-        SocketUtil::UdpHandler.new(@usock, log, 2048, callback)
+        Fluent::SocketUtil::UdpHandler.new(@usock, log, @message_length_limit, callback)
       else
         # syslog family add "\n" to each message and this seems only way to split messages in tcp stream
         lsock = client.listen_tcp(@bind, @port)
-        Coolio::TCPServer.new(lsock, nil, SocketUtil::TcpHandler, log, "\n", callback)
+        Coolio::TCPServer.new(lsock, nil, Fluent::SocketUtil::TcpHandler, log, "\n", callback)
       end
     end
 

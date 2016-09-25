@@ -30,7 +30,9 @@ module Fluent
           if block
             # Create new class for test w/ overwritten methods
             #   klass.dup is worse because its ancestors does NOT include original class name
+            klass_name = klass.name
             klass = Class.new(klass)
+            klass.define_singleton_method("name") { klass_name }
             klass.module_eval(&block)
           end
           @instance = klass.new
@@ -62,6 +64,7 @@ module Fluent
       # num_waits is for checking thread status. This will be removed after improved plugin API
       def run(num_waits = 10, &block)
         @instance.start
+        @instance.after_start
         begin
           # wait until thread starts
           num_waits.times { sleep 0.05 }
@@ -71,12 +74,5 @@ module Fluent
         end
       end
     end
-  end
-end
-
-Test::Unit::Assertions.module_eval do
-  def assert_equal_event_time(a, b)
-    assert_equal(a.sec, b.sec)
-    assert_equal(a.nsec, b.nsec)
   end
 end

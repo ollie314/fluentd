@@ -17,19 +17,25 @@
 require 'fluent/plugin'
 require 'fluent/plugin/formatter'
 require 'fluent/config/element'
+require 'fluent/configurable'
 
 module Fluent
   module PluginHelper
     module Formatter
-      def formatter_create(usage: '', type: nil, conf: nil)
+      def formatter_create(usage: '', type: nil, conf: nil, default_type: nil)
         formatter = @_formatters[usage]
         return formatter if formatter
 
-        if !type
-          raise ArgumentError, "BUG: both type and conf are not specified" unless conf
-          raise Fluent::ConfigError, "@type is required in <format>" unless conf['@type']
-          type = conf['@type']
-        end
+        type = if type
+                 type
+               elsif conf && conf.respond_to?(:[])
+                 raise Fluent::ConfigError, "@type is required in <format>" unless conf['@type']
+                 conf['@type']
+               elsif default_type
+                 default_type
+               else
+                 raise ArgumentError, "BUG: both type and conf are not specified"
+               end
         formatter = Fluent::Plugin.new_formatter(type, parent: self)
         config = case conf
                  when Fluent::Config::Element
@@ -52,14 +58,17 @@ module Fluent
         formatter
       end
 
-      def self.included(mod)
-        mod.instance_eval do
-          # minimum section definition to instantiate formatter plugin instances
-          config_section :format, required: false, multi: true, param_name: :formatter_configs do
-            config_argument :usage, :string, default: ''
-            config_param    :@type, :string
-          end
+      module FormatterParams
+        include Fluent::Configurable
+        # minimum section definition to instantiate formatter plugin instances
+        config_section :format, required: false, multi: true, param_name: :formatter_configs do
+          config_argument :usage, :string, default: ''
+          config_param    :@type, :string
         end
+      end
+
+      def self.included(mod)
+        mod.include FormatterParams
       end
 
       attr_reader :_formatters # for tests
@@ -73,13 +82,15 @@ module Fluent
       def configure(conf)
         super
 
-        @formatter_configs.each do |section|
-          if @_formatters[section.usage]
-            raise Fluent::ConfigError, "duplicated formatter configured: #{section.usage}"
+        if @formatter_configs
+          @formatter_configs.each do |section|
+            if @_formatters[section.usage]
+              raise Fluent::ConfigError, "duplicated formatter configured: #{section.usage}"
+            end
+            formatter = Plugin.new_formatter(section[:@type], parent: self)
+            formatter.configure(section.corresponding_config_element)
+            @_formatters[section.usage] = formatter
           end
-          formatter = Plugin.new_formatter(section[:@type], parent: self)
-          formatter.configure(section.corresponding_config_element)
-          @_formatters[section.usage] = formatter
         end
       end
 

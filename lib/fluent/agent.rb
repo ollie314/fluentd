@@ -63,6 +63,7 @@ module Fluent
       conf.elements('filter', 'match').each { |e|
         pattern = e.arg.empty? ? '**' : e.arg
         type = e['@type']
+        raise ConfigError, "Missing '@type' parameter on <#{e.name}> directive" unless type
         if e.name == 'filter'
           add_filter(type, pattern, e)
         else
@@ -134,6 +135,10 @@ module Fluent
       output.router = @event_router if output.respond_to?(:router=)
       output.configure(conf)
       @outputs << output
+      if output.respond_to?(:outputs) && (output.respond_to?(:multi_output?) && output.multi_output? || output.is_a?(Fluent::MultiOutput))
+        # TODO: ruby 2.3 or later: replace `output.respond_to?(:multi_output?) && output.multi_output?` with output&.multi_output?
+        @outputs.push(*output.outputs)
+      end
       @event_router.add_rule(pattern, output)
 
       output

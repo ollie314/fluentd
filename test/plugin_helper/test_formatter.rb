@@ -19,6 +19,13 @@ class FormatterHelperTest < Test::Unit::TestCase
     helpers :formatter
   end
 
+  class Dummy2 < Fluent::Plugin::TestBase
+    helpers :formatter
+    config_section :format do
+      config_set_default :@type, 'example2'
+    end
+  end
+
   setup do
     @d = nil
   end
@@ -35,6 +42,39 @@ class FormatterHelperTest < Test::Unit::TestCase
   test 'can be initialized without any formatters at first' do
     d = Dummy.new
     assert_equal 0, d._formatters.size
+  end
+
+  test 'can override default configuration parameters, but not overwrite whole definition' do
+    d = Dummy.new
+    assert_equal [], d.formatter_configs
+
+    d = Dummy2.new
+    d.configure(config_element('ROOT', '', {}, [config_element('format', '', {}, [])]))
+    assert_raise NoMethodError do
+      d.format
+    end
+    assert_equal 1, d.formatter_configs.size
+    assert_equal 'example2', d.formatter_configs.first[:@type]
+  end
+
+  test 'creates instance of type specified by conf, or default_type if @type is missing in conf' do
+    d = Dummy2.new
+    d.configure(config_element())
+    i = d.formatter_create(conf: config_element('format', '', {'@type' => 'example'}), default_type: 'example2')
+    assert{ i.is_a?(ExampleFormatter) }
+
+    d = Dummy2.new
+    d.configure(config_element())
+    i = d.formatter_create(conf: nil, default_type: 'example2')
+    assert{ i.is_a?(Example2Formatter) }
+  end
+
+  test 'raises config error if config section is specified, but @type is not specified' do
+    d = Dummy2.new
+    d.configure(config_element())
+    assert_raise Fluent::ConfigError.new("@type is required in <format>") do
+      d.formatter_create(conf: config_element('format', '', {}), default_type: 'example2')
+    end
   end
 
   test 'can be configured without format sections' do
