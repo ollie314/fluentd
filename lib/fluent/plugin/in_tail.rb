@@ -208,7 +208,7 @@ module Fluent::Plugin
       line_buffer_timer_flusher = (@multiline_mode && @multiline_flush_interval) ? TailWatcher::LineBufferTimerFlusher.new(log, @multiline_flush_interval, &method(:flush_buffer)) : nil
       tw = TailWatcher.new(path, @rotate_wait, pe, log, @read_from_head, @enable_watch_timer, @read_lines_limit, method(:update_watcher), line_buffer_timer_flusher, &method(:receive_lines))
       tw.attach do |watcher|
-        timer_execute(:in_tail_timer_trigger, 1, &watcher.method(:on_notify)) if watcher.enable_watch_timer
+        watcher.timer_trigger = timer_execute(:in_tail_timer_trigger, 1, &watcher.method(:on_notify)) if watcher.enable_watch_timer
         event_loop_attach(watcher.stat_trigger)
       end
       tw
@@ -248,6 +248,12 @@ module Fluent::Plugin
 
     # refresh_watchers calls @tails.keys so we don't use stop_watcher -> start_watcher sequence for safety.
     def update_watcher(path, pe)
+      if @pf
+        unless pe.read_inode == @pf[path].read_inode
+          log.trace "Skip update_watcher because watcher has been already updated by other inotify event"
+          return
+        end
+      end
       rotated_tw = @tails[path]
       @tails[path] = setup_watcher(path, pe)
       close_watcher_after_rotate_wait(rotated_tw) if rotated_tw
@@ -398,6 +404,7 @@ module Fluent::Plugin
         @update_watcher = update_watcher
 
         @stat_trigger = StatWatcher.new(path, log, &method(:on_notify))
+        @timer_trigger = nil
 
         @rotate_handler = RotateHandler.new(path, log, &method(:on_rotate))
         @io_handler = nil
@@ -426,6 +433,7 @@ module Fluent::Plugin
       end
 
       def detach
+        @timer_trigger.detach if @enable_watch_timer && @timer_trigger.attached?
         @stat_trigger.detach if @stat_trigger.attached?
       end
 
