@@ -119,6 +119,12 @@ module Fluent
         raise NotImplementedError, "BUG: output plugins MUST implement this method"
       end
 
+      def formatted_to_msgpack_binary
+        # To indicate custom format method (#format) returns msgpack binary or not.
+        # If #format returns msgpack binary, override this method to return true.
+        false
+      end
+
       def prefer_buffered_processing
         # override this method to return false only when all of these are true:
         #  * plugin has both implementation for buffered and non-buffered methods
@@ -176,11 +182,13 @@ module Fluent
           @buffering = true
         end
         @custom_format = implement?(:custom_format)
+        @enable_msgpack_streamer = false # decided later
 
         @buffer = nil
         @secondary = nil
         @retry = nil
         @dequeued_chunks = nil
+        @output_enqueue_thread = nil
         @output_flush_threads = nil
 
         @simple_chunking = nil
@@ -340,6 +348,7 @@ module Fluent
           end
 
           @custom_format = implement?(:custom_format)
+          @enable_msgpack_streamer = @custom_format ? formatted_to_msgpack_binary : true
           @delayed_commit = if implement?(:buffered) && implement?(:delayed_commit)
                               prefer_delayed_commit
                             else
@@ -358,6 +367,9 @@ module Fluent
           @retry_mutex = Mutex.new
 
           @buffer.start
+
+          @output_enqueue_thread = nil
+          @output_enqueue_thread_running = true
 
           @output_flush_threads = []
           @output_flush_threads_mutex = Mutex.new
@@ -389,7 +401,7 @@ module Fluent
 
           unless @in_tests
             if @flush_mode == :interval || @chunk_key_time
-              thread_create(:enqueue_thread, &method(:enqueue_thread_run))
+              @output_enqueue_thread = thread_create(:enqueue_thread, &method(:enqueue_thread_run))
             end
           end
         end
@@ -416,6 +428,12 @@ module Fluent
             force_flush
           end
           @buffer.before_shutdown
+          # Need to ensure to stop enqueueing ... after #shutdown, we cannot write any data
+          @output_enqueue_thread_running = false
+          if @output_enqueue_thread && @output_enqueue_thread.alive?
+            @output_enqueue_thread.wakeup
+            @output_enqueue_thread.join
+          end
         end
 
         super
@@ -740,6 +758,13 @@ module Fluent
         end
       end
 
+      def metadata_for_test(tag, time, record)
+        raise "BUG: #metadata_for_test is available only when no actual metadata exists" unless @buffer.metadata_list.empty?
+        m = metadata(tag, time, record)
+        @buffer.metadata_list_clear!
+        m
+      end
+
       def execute_chunking(tag, es, enqueue: false)
         if @simple_chunking
           handle_stream_simple(tag, es, enqueue: enqueue)
@@ -948,7 +973,7 @@ module Fluent
           using_secondary = true
         end
 
-        unless @custom_format
+        if @enable_msgpack_streamer
           chunk.extend ChunkMessagePackEventStreamer
         end
 
@@ -975,6 +1000,10 @@ module Fluent
         rescue => e
           log.debug "taking back chunk for errors.", plugin_id: plugin_id, chunk: dump_unique_id_hex(chunk.unique_id)
           @buffer.takeback_chunk(chunk.unique_id)
+
+          if @under_plugin_development
+            raise
+          end
 
           @retry_mutex.synchronize do
             if @retry
@@ -1096,7 +1125,7 @@ module Fluent
         log.debug "enqueue_thread actually running"
 
         begin
-          while @output_flush_threads_running
+          while @output_enqueue_thread_running
             now_int = Time.now.to_i
             if @output_flush_interrupted
               sleep interval
@@ -1120,16 +1149,18 @@ module Fluent
                 @buffer.enqueue_all{ |metadata, chunk| metadata.timekey < current_timekey && metadata.timekey + timekey_unit + timekey_wait <= now_int }
               end
             rescue => e
-              log.error "unexpected error while checking flushed chunks. ignored.", plugin_id: plugin_id, error_class: e.class, error: e
+              raise if @under_plugin_development
+              log.error "unexpected error while checking flushed chunks. ignored.", plugin_id: plugin_id, error: e
               log.error_backtrace
+            ensure
+              @output_enqueue_thread_waiting = false
+              @output_enqueue_thread_mutex.unlock
             end
-            @output_enqueue_thread_waiting = false
-            @output_enqueue_thread_mutex.unlock
             sleep interval
           end
         rescue => e
           # normal errors are rescued by inner begin-rescue clause.
-          log.error "error on enqueue thread", plugin_id: plugin_id, error_class: e.class, error: e
+          log.error "error on enqueue thread", plugin_id: plugin_id, error: e
           log.error_backtrace
           raise
         end
